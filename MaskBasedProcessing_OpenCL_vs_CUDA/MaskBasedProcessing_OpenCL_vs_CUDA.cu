@@ -1,6 +1,9 @@
 
 #ifdef HAS_CUDA
 
+#include <memory>
+#include <vector>
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -36,7 +39,6 @@ __global__
 void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
   int K2 = K >> 1;
   int globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
-  int localIndex  = threadIdx.x;
 
   if(globalIndex < N) {
     int z = globalIndex / (dimY * dimX);
@@ -55,71 +57,85 @@ void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, siz
 }
 
 
-int launchKernel(float* out, float* in, size_t N, size_t* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int threadsPerBlock)
+cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int threadsPerBlock)
 {
+#define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
+#define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
+
   cudaError_t error;
   size_t sizeInBytes = N * sizeof(float);
   size_t offsetBytes = K * K * K * sizeof(size_t);
   
   float* device_in;
   error = cudaMalloc((void**)&device_in, sizeInBytes);
-  if(error != cudaError_t::cudaSuccess) {
-    return -1;
-  }
+  HANDLE_ERROR(error);
   
   float* device_out;
   error = cudaMalloc((void**)&device_out, sizeInBytes);
-  if(error != cudaError_t::cudaSuccess) {
-    cudaFree(device_in);
-    return -1;
-  }
+  HANDLE_ERROR_STMT(error, cudaFree(device_in));
   
   size_t* device_offsets;
   error = cudaMalloc((void**)&device_offsets, offsetBytes);
-  if(error != cudaError_t::cudaSuccess) {
-    cudaFree(device_in);
-    cudaFree(device_out);
-    return -1;
-  }
+  HANDLE_ERROR_STMT(error, cudaFree(device_in); cudaFree(device_out));
 
-  cudaMemcpy(device_in,           in, sizeInBytes, cudaMemcpyHostToDevice);
-  cudaMemcpy(device_offsets, offsets, offsetBytes, cudaMemcpyHostToDevice);
+  error = cudaMemcpy(device_in,           in, sizeInBytes, cudaMemcpyHostToDevice);
+  error = cudaMemcpy(device_offsets, offsets, offsetBytes, cudaMemcpyHostToDevice);
+  HANDLE_ERROR(error);
 
   int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
   cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  cudaEventRecord(start, 0);
+  error = cudaEventCreate(&start);
+  error = cudaEventCreate(&stop);
+  error = cudaEventRecord(start, 0);
+  HANDLE_ERROR(error);
 
   useStats<<< blocksPerGrid, threadsPerBlock >>>(device_in, device_out, device_offsets, K, N, dimX, dimY, dimZ);
 
-  cudaEventRecord(stop, 0);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(elapsedTime, start, stop);
+  error = cudaEventRecord(stop, 0);
+  error = cudaEventSynchronize(stop);
+  error = cudaEventElapsedTime(elapsedTime, start, stop);
+  HANDLE_ERROR(error);
 
-  cudaDeviceSynchronize();
+  error = cudaDeviceSynchronize();
+  HANDLE_ERROR(error);
 
-  cudaMemcpy(out, device_out, sizeInBytes, cudaMemcpyDeviceToHost);
+  error = cudaMemcpy(out, device_out, sizeInBytes, cudaMemcpyDeviceToHost);
+  HANDLE_ERROR(error);
 
-  cudaFree(device_in);
-  cudaFree(device_out);
-  cudaFree(device_offsets);
-  return 0;
+  error = cudaFree(device_in);
+  error = cudaFree(device_out);
+  error = cudaFree(device_offsets);
+  HANDLE_ERROR(error);
+  return cudaError_t::cudaSuccess;
+
+#undef HANDLE_ERROR
+#undef HANDLE_ERROR_STMT
 }
 
 
-void getGPUInformation(int* nr_gpus, size_t** availableMemoryPerDevice, size_t** totalMemoryPerDevice) {
-  cudaGetDeviceCount(nr_gpus);
-  *availableMemoryPerDevice = (size_t*)malloc(*nr_gpus * sizeof(size_t));
-  *totalMemoryPerDevice     = (size_t*)malloc(*nr_gpus * sizeof(size_t));
-
-  for (int gpuID = 0; gpuID < *nr_gpus; ++gpuID) {
-    cudaSetDevice(gpuID);
-    int _id = 0;
-    cudaGetDevice(&_id);
-    cudaMemGetInfo(availableMemoryPerDevice[gpuID], totalMemoryPerDevice[gpuID]);
+cudaError_t getGPUInformation(int& nr_gpus, std::vector< size_t >& availableMemoryPerDevice, std::vector< size_t >& totalMemoryPerDevice) {
+  cudaError_t error = cudaError_t::cudaSuccess;
+  error = cudaGetDeviceCount(std::addressof(nr_gpus));
+  if(error != cudaError_t::cudaSuccess || nr_gpus <= 0) {
+    // Either on error or if there are no usable GPUS, early return.
+    return error;
   }
+
+  availableMemoryPerDevice.resize(nr_gpus);
+  totalMemoryPerDevice.resize(nr_gpus);
+
+  // If there are GPUs available for CUDA usage, retrieve the info from them.
+  for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
+    error = cudaSetDevice(gpuID);
+    error = cudaMemGetInfo(&availableMemoryPerDevice[gpuID], &totalMemoryPerDevice[gpuID]);
+
+    if(error != cudaError_t::cudaSuccess) {
+      return error;
+    }
+  }
+
+  return cudaError_t::cudaSuccess;
 }
 
 #endif // HAS_CUDA

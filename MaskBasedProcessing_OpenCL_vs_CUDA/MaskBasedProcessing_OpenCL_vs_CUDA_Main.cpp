@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
   int K2 = K >> 1;
   int E = 9;
 
-  float memInGB = 0.25; // need this two times (in/out) and tmp memory!
+  double memInGB = 0.125; // need this two times (in/out) and tmp memory!
 
   size_t dimX = 1ull << E;
   size_t dimY = 1ull << E;
@@ -87,7 +87,8 @@ int main(int argc, char** argv) {
   std::for_each(data.begin(), data.end(), [&](float& f) {f = dist(gen); });
 
   // Prepare the ground truth results on CPU.
-  std::vector< size_t > offsets(K*K*K, 0);
+  size_t envSize = static_cast< size_t >(K) * K * K;
+  std::vector< size_t > offsets(envSize, 0);
   size_t _o = 0;
   for (int _z = -K2; _z <= K2; ++_z) {
     for (int _y = -K2; _y <= K2; ++_y) {
@@ -125,44 +126,52 @@ int main(int argc, char** argv) {
 #ifdef HAS_CUDA
 
   int nr_gpus = 0;
-  size_t* availableMemoryPerDevice = NULL;
-  size_t* totalMemoryPerDevice = NULL;
-  getGPUInformation(&nr_gpus, &availableMemoryPerDevice, &totalMemoryPerDevice);
+  std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
+  cudaError_t error = getGPUInformation(nr_gpus, availableMemoryPerDevice, totalMemoryPerDevice);
 
-  std::cout << "[INFO] Detected " << nr_gpus << " GPUs that can run CUDA.\n";
-  for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
-    std::string freeUnit, totalUnit;
-    float freeMem  = formatMemory(availableMemoryPerDevice[gpuID], freeUnit);
-    float totalMem = formatMemory(    totalMemoryPerDevice[gpuID], totalUnit);
-    float frac     = (double)availableMemoryPerDevice[gpuID] / (double)totalMemoryPerDevice[gpuID];
-    std::cout << "[INFO]   Device " << gpuID << " has " << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of " << std::setprecision(3) << totalMem << ' ' << totalUnit << " (-> " << std::setprecision(4) << frac*100.f << " %)\n";
-  }
-
-  auto call_cuda_kernel = [&](int threadsPerBlock) {
-    float elapsedTimeInMilliseconds = -1;
-    int cuda_kernel_error = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, threadsPerBlock);
-    if (cuda_kernel_error != 0) {
-      std::cout << "SOME ERROR HAPPENED\n";
+  if(error != cudaError_t::cudaSuccess) {
+    std::cerr << "Error during GPU information retrieval, error was: " << cudaGetErrorString(error) << '\n';
+  } else {
+    std::cout << "[INFO] Detected " << nr_gpus << " GPUs that can run CUDA.\n";
+    for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
+      std::string freeUnit, totalUnit;
+      float freeMem  = formatMemory(availableMemoryPerDevice[gpuID], freeUnit);
+      float totalMem = formatMemory(    totalMemoryPerDevice[gpuID], totalUnit);
+      float frac     = (double)availableMemoryPerDevice[gpuID] / (double)totalMemoryPerDevice[gpuID];
+      std::cout << "[INFO]   Device " << gpuID << " has " 
+                << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of " 
+                << std::setprecision(3) << totalMem << ' ' << totalUnit 
+                << " (-> " << std::setprecision(4) << frac*100.f << " %)\n";
     }
 
-    std::cout << " - Execution of kernel (" << std::setw(3) << threadsPerBlock << " threads/block) took " << std::setprecision(5) << elapsedTimeInMilliseconds << " milliseconds.\n";
-
-    float maxCUDAError = 0.f;
-    auto inIt = groundTruth.begin(), outIt = host_output.begin();
-    for (; inIt != groundTruth.end(); ++inIt, ++outIt) {
-      maxCUDAError = std::fmaxf(maxCUDAError, std::fabsf(*inIt - *outIt));
-      if (maxCUDAError > 0) {
-        std::cerr << *inIt << " - " << *outIt << '\n'; break;
+    auto call_cuda_kernel = [&](int threadsPerBlock) {
+      float elapsedTimeInMilliseconds = -1;
+      cudaError_t cuda_kernel_error = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, threadsPerBlock);
+      if (cuda_kernel_error != cudaError_t::cudaSuccess) {
+        std::cerr << "Error during Kernel launch, error was '" << cudaGetErrorString(cuda_kernel_error) << "'\n";
+        return;
       }
-    }
-    if (maxCUDAError > 1e-5) {
-      std::cout << "Max error with CUDA execution is: " << maxCUDAError << '\n';
-    }
-  };
 
-  for (int threadsPerBlock : {1, 4, 16, 64, 256, 512}) {
-    call_cuda_kernel(threadsPerBlock);
-  }
+      std::cout << " - Execution of kernel (" << std::setw(3) << threadsPerBlock << " threads/block) took " << std::setprecision(5) << elapsedTimeInMilliseconds << " milliseconds.\n";
+
+      float maxCUDAError = 0.f;
+      auto inIt = groundTruth.begin(), outIt = host_output.begin();
+      for (; inIt != groundTruth.end(); ++inIt, ++outIt) {
+        maxCUDAError = std::fmaxf(maxCUDAError, std::fabsf(*inIt - *outIt));
+        if (maxCUDAError > 0) {
+          std::cerr << *inIt << " - " << *outIt << '\n'; break;
+        }
+      }
+      if (maxCUDAError > 1e-5) {
+        std::cout << "Max error with CUDA execution is: " << maxCUDAError << '\n';
+      }
+    };
+
+    for (int threadsPerBlock : {1, 4, 16, 64, 256, 512}) {
+      call_cuda_kernel(threadsPerBlock);
+    }
+
+    }
 
 #endif
 
