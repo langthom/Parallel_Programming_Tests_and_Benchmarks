@@ -13,25 +13,42 @@
 
 __device__
 void stats(float* features, float* in, int globalIndex, size_t* offsets, int envSize) {
-  float count = 0, mean = 0, M2 = 0, M3 = 0, M4 = 0;
-  for (int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxel = in[globalIndex + offsets[voxelIndex]];
-    float n1 = count;
-    count += 1;
-    float delta = voxel - mean;
-    float delta_n = delta / count;
-    float delta_n2 = delta_n * delta_n;
-    float term1 = delta * delta_n * n1;
-    mean += delta_n;
-    M4 += term1 * delta_n2 * (count * count - 3 * count + 3) + 6 * delta_n2 * M2 - 4 * delta_n * M3;
-    M3 += term1 * delta_n * (count - 2) - 3 * delta_n * M2;
-    M2 += term1;
-  }
+  // This is not an efficient or even numerically stable way to compute the centralized 
+  // statistical moments, but it does a few more computations and thus put some mild
+  // computational load on the device.
 
-  *features++ = mean;
-  *features++ = powf(M2 / count, 0.5f);
-  *features++ = M2 < 1e-7 ? 0.0 : (M3 * powf(count, 0.5f) / powf(M2, 1.5f));
-  *features   = M2 < 1e-7 ? -3.0 : ((M4 * count) / (M2 * M2) - 3);
+  float sum = 0.f;
+
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    sum += in[globalIndex + offsets[voxelIndex]];
+  }
+  float mean = sum / envSize;
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
+    sum += voxelDiff * voxelDiff;
+  }
+  float stdev = sqrtf(sum / (envSize - 1));
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
+    sum += voxelDiff * voxelDiff * voxelDiff;
+  }
+  float skewness = sum / (envSize * stdev * stdev * stdev);
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
+    sum += voxelDiff * voxelDiff * voxelDiff * voxelDiff;
+  }
+  float kurtosis = sum / (envSize * stdev * stdev) - 3.f;
+
+  features[0] = mean;
+  features[1] = stdev;
+  features[2] = skewness;
+  features[3] = kurtosis;
 }
 
 
@@ -39,19 +56,23 @@ __global__
 void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
   int K2 = K >> 1;
   int globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride      = blockDim.x * gridDim.x;
 
-  if(globalIndex < N) {
-    int z = globalIndex / (dimY * dimX);
-    int j = globalIndex - z * dimY * dimX;
+  float features[4];
+
+  for(int i = globalIndex; i < N; i += stride) {
+    int z = i / (dimY * dimX);
+    int j = i - z * dimY * dimX;
     int y = j / dimX;
     int x = j % dimX;
 
-    if (x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2) {
-      out[globalIndex] = 0.f;
+    bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;
+
+    if (isInPadding) {
+      out[i] = 0.f;
     } else {
-      float features[4];
-      stats(features, in, globalIndex, offsets, K*K*K);
-      out[globalIndex] = features[0]; //!!
+      stats(features, in, i, offsets, K*K*K);
+      out[i] = features[0];
     }
   }
 }
@@ -62,7 +83,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
 
-  cudaError_t error;
+  cudaError_t error = cudaError_t::cudaSuccess;
   size_t sizeInBytes = N * sizeof(float);
   size_t offsetBytes = K * K * K * sizeof(size_t);
   

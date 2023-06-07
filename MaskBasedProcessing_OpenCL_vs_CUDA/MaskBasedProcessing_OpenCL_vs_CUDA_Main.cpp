@@ -36,25 +36,38 @@ inline std::array< float, 4 > stats(float* buffer, size_t* offsets, int index, i
 
   std::array< float, 4 > features;
 
-  float count = 0, mean = 0, M2 = 0, M3 = 0, M4 = 0;
-  for (int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxel = env[voxelIndex];
-    float n1 = count;
-    count += 1;
-    float delta = voxel - mean;
-    float delta_n = delta / count;
-    float delta_n2 = delta_n * delta_n;
-    float term1 = delta * delta_n * n1;
-    mean += delta_n;
-    M4 += term1 * delta_n2 * (count * count - 3 * count + 3) + 6 * delta_n2 * M2 - 4 * delta_n * M3;
-    M3 += term1 * delta_n * (count - 2) - 3 * delta_n * M2;
-    M2 += term1;
+  float sum = 0.f;
+
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    sum += env[voxelIndex];
   }
+  float mean = sum / envSize;
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = env[voxelIndex] - mean;
+    sum += voxelDiff * voxelDiff;
+  }
+  float stdev = std::sqrtf(sum / (envSize - 1));
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = env[voxelIndex] - mean;
+    sum += voxelDiff * voxelDiff * voxelDiff;
+  }
+  float skewness = sum / (envSize * stdev * stdev * stdev);
+
+  sum = 0.f;
+  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
+    float voxelDiff = env[voxelIndex] - mean;
+    sum += voxelDiff * voxelDiff * voxelDiff * voxelDiff;
+  }
+  float kurtosis = sum / (envSize * stdev * stdev) - 3.f;
 
   features[0] = mean;
-  features[1] = std::powf(M2 / count, 0.5f);
-  features[2] = M2 < 1e-7 ? 0.0 : (M3 * pow(count, 0.5f) / pow(M2, 1.5f));
-  features[3] = M2 < 1e-7 ? -3.0 : ((M4 * count) / (M2 * M2) - 3);
+  features[1] = stdev;
+  features[2] = skewness;
+  features[3] = kurtosis;
   return features;
 }
 
@@ -142,6 +155,10 @@ int main(int argc, char** argv) {
                 << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of " 
                 << std::setprecision(3) << totalMem << ' ' << totalUnit 
                 << " (-> " << std::setprecision(4) << frac*100.f << " %)\n";
+
+      cudaDeviceProp properties;
+      cudaGetDeviceProperties(&properties, gpuID);
+      std::cout << "  * Name: " << properties.name << '\n';
     }
 
     auto call_cuda_kernel = [&](int threadsPerBlock) {
@@ -171,7 +188,7 @@ int main(int argc, char** argv) {
       call_cuda_kernel(threadsPerBlock);
     }
 
-    }
+  }
 
 #endif
 
