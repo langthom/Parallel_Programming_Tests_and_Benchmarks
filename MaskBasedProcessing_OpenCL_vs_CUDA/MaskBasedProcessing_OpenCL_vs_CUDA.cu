@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <vector>
+#include <string>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -135,7 +136,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K
 }
 
 
-cudaError_t getGPUInformation(int& nr_gpus, std::vector< size_t >& availableMemoryPerDevice, std::vector< size_t >& totalMemoryPerDevice) {
+cudaError_t getGPUInformation(int& nr_gpus, std::vector< std::string >& deviceNames, std::vector< size_t >& availableMemoryPerDevice, std::vector< size_t >& totalMemoryPerDevice) {
   cudaError_t error = cudaError_t::cudaSuccess;
   error = cudaGetDeviceCount(std::addressof(nr_gpus));
   if(error != cudaError_t::cudaSuccess || nr_gpus <= 0) {
@@ -143,6 +144,7 @@ cudaError_t getGPUInformation(int& nr_gpus, std::vector< size_t >& availableMemo
     return error;
   }
 
+  deviceNames.resize(nr_gpus);
   availableMemoryPerDevice.resize(nr_gpus);
   totalMemoryPerDevice.resize(nr_gpus);
 
@@ -150,6 +152,10 @@ cudaError_t getGPUInformation(int& nr_gpus, std::vector< size_t >& availableMemo
   for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
     error = cudaSetDevice(gpuID);
     error = cudaMemGetInfo(&availableMemoryPerDevice[gpuID], &totalMemoryPerDevice[gpuID]);
+    
+    cudaDeviceProp deviceProperties;
+    error = cudaGetDeviceProperties(&deviceProperties, gpuID);
+    deviceNames[gpuID] = deviceProperties.name;
 
     if(error != cudaError_t::cudaSuccess) {
       return error;

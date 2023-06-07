@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
   int K2 = K >> 1;
   int E = 9;
 
-  double memInGB = 0.125; // need this two times (in/out) and tmp memory!
+  double memInGB = 1; // need this two times (in/out) and tmp memory!
 
   size_t dimX = 1ull << E;
   size_t dimY = 1ull << E;
@@ -139,8 +139,9 @@ int main(int argc, char** argv) {
 #ifdef HAS_CUDA
 
   int nr_gpus = 0;
+  std::vector< std::string > deviceNames;
   std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
-  cudaError_t error = getGPUInformation(nr_gpus, availableMemoryPerDevice, totalMemoryPerDevice);
+  cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
 
   if(error != cudaError_t::cudaSuccess) {
     std::cerr << "Error during GPU information retrieval, error was: " << cudaGetErrorString(error) << '\n';
@@ -151,14 +152,10 @@ int main(int argc, char** argv) {
       float freeMem  = formatMemory(availableMemoryPerDevice[gpuID], freeUnit);
       float totalMem = formatMemory(    totalMemoryPerDevice[gpuID], totalUnit);
       float frac     = (double)availableMemoryPerDevice[gpuID] / (double)totalMemoryPerDevice[gpuID];
-      std::cout << "[INFO]   Device " << gpuID << " has " 
+      std::cout << "[INFO]   Device " << gpuID << " (" << deviceNames[gpuID] << ") has " 
                 << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of " 
                 << std::setprecision(3) << totalMem << ' ' << totalUnit 
                 << " (-> " << std::setprecision(4) << frac*100.f << " %)\n";
-
-      cudaDeviceProp properties;
-      cudaGetDeviceProperties(&properties, gpuID);
-      std::cout << "  * Name: " << properties.name << '\n';
     }
 
     auto call_cuda_kernel = [&](int threadsPerBlock) {
