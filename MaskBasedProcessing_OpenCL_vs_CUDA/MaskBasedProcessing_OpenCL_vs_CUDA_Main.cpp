@@ -197,17 +197,20 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
 
   if (error != cudaError_t::cudaSuccess) {
     std::cerr << "Error during GPU information retrieval, error was: " << cudaGetErrorString(error) << '\n';
-  } else if(printSpecs) {
-    std::cout << "[INFO] Detected " << nr_gpus << " GPUs that can run CUDA.\n";
-    for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
-      std::string freeUnit, totalUnit;
-      float freeMem = formatMemory(availableMemoryPerDevice[gpuID], freeUnit);
-      float totalMem = formatMemory(totalMemoryPerDevice[gpuID], totalUnit);
-      float frac = (double)availableMemoryPerDevice[gpuID] / (double)totalMemoryPerDevice[gpuID];
-      std::cout << "[INFO]   Device " << gpuID << " (" << deviceNames[gpuID] << ") has "
-        << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of "
-        << std::setprecision(3) << totalMem << ' ' << totalUnit
-        << " (-> " << std::setprecision(4) << frac * 100.f << " %)\n";
+  } else {
+
+    if (printSpecs) {
+      std::cout << "[INFO] Detected " << nr_gpus << " GPUs that can run CUDA.\n";
+      for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
+        std::string freeUnit, totalUnit;
+        float freeMem  = formatMemory(availableMemoryPerDevice[gpuID], freeUnit);
+        float totalMem = formatMemory(totalMemoryPerDevice[gpuID], totalUnit);
+        float frac = (double)availableMemoryPerDevice[gpuID] / (double)totalMemoryPerDevice[gpuID];
+        std::cout << "[INFO]   Device " << gpuID << " (" << deviceNames[gpuID] << ") has "
+          << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of "
+          << std::setprecision(3) << totalMem << ' ' << totalUnit
+          << " (-> " << std::setprecision(4) << frac * 100.f << " %)\n";
+      }
     }
 
     auto call_cuda_kernel = [&](int threadsPerBlock) {
@@ -413,11 +416,12 @@ int main(int argc, char** argv) {
   double maxMemoryInGB = getMaxMemoryInGB();
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
 
-  std::ofstream log("benchmark.csv");
+  std::string benchmarkLogFile = argc < 2 ? "benchmark.csv" : argv[1];
+  std::ofstream log(benchmarkLogFile);
 
   bool firstRun = true;
   for (int percentage = 100; percentage >= 1; percentage -= 20) {
-    for (int K : {3, 5, 7, 9, 11}) {
+    for (int K : {11, 9, 7, 5, 3}) {
       benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun);
       log << std::string(100, '=') << '\n';
       firstRun = false;
