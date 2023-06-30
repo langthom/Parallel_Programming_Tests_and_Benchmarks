@@ -1,4 +1,6 @@
 
+#define NOMINMAX
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -7,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -385,7 +388,6 @@ double getMaxMemoryInGB() {
   }
 #endif
 
-  // Call the OpenCL kernel
 #ifdef HAS_OPENCL
   std::vector< cl::Platform > platforms;
   cl::Platform::get(&platforms);
@@ -410,23 +412,47 @@ double getMaxMemoryInGB() {
   return maxMemoryInGB;
 }
 
+/* ------------------------------------------------------------------------------------------------------------------------------------------------- */
 
 int main(int argc, char** argv) {
+
+  if (argc < 5) {
+    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <num-percentages>  <Kmin>  <Kmax>\n\n";
+    std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
+    std::cerr << "  <num-percentages>               Number of percentages of the max memory to sample. Must be bigger in [1..100], e.g. setting 2 will result in using 100% and 50%.\n";
+    std::cerr << "  <Kmin>                          Minimum environment size, must be bigger than one and odd.\n";
+    std::cerr << "  <Kmax>                          Maximum environment size, must be bigger than one and odd.\n";
+    return EXIT_FAILURE;
+  }
+
+  auto parseInt = [](char const* arg) -> int {
+    int value;
+    std::istringstream(arg) >> value;
+    return value;
+  };
+
+  std::string benchmarkLogFile = argv[1];
+  int numPercentages  = parseInt(argv[2]);
+  int _Kmin           = parseInt(argv[3]);
+  int _Kmax           = parseInt(argv[4]);
+  int Kmin            = std::min(_Kmin, _Kmax);
+  int Kmax            = std::max(_Kmin, _Kmax);
+
 
   double maxMemoryInGB = getMaxMemoryInGB();
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
 
-  std::string benchmarkLogFile = argc < 2 ? "benchmark.csv" : argv[1];
   std::ofstream log(benchmarkLogFile);
 
   bool firstRun = true;
-  for (int percentage = 100; percentage >= 1; percentage -= 20) {
-    for (int K : {11, 9, 7, 5, 3}) {
+  int percentageStep = 100 / numPercentages;
+  for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
+    for(int K = Kmax; K >= Kmin; K -= 2) {
       benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun);
       log << std::string(100, '=') << '\n';
       firstRun = false;
     }
   }
 
-  return 0;
+  return EXIT_SUCCESS;
 }
