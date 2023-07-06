@@ -130,7 +130,7 @@ std::string getOpenCLKernel() {
   return kernel;
 }
 
-void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
+void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs, int maxThreadsPerBlock) {
   int K2 = K >> 1;
   int E = 9;
 
@@ -213,15 +213,23 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
           << std::setprecision(3) << freeMem << ' ' << freeUnit << " free memory out of "
           << std::setprecision(3) << totalMem << ' ' << totalUnit
           << " (-> " << std::setprecision(4) << frac * 100.f << " %)\n";
+
+        int maxPotentialBlockSize;
+        error = getMaxPotentialBlockSize(maxPotentialBlockSize, gpuID);
+        if(error != cudaError_t::cudaSuccess) {
+          std::cerr << "Error while retrieving the max. potential block size, error was: " << cudaGetErrorString(error) << '\n';
+        } else {
+          std::wcout << "[INFO]    - max potential block size for device " << gpuID << " is: " << maxPotentialBlockSize << '\n';
+        }
       }
     }
 
-    auto call_cuda_kernel = [&](int threadsPerBlock) {
+    auto call_cuda_kernel = [&](int deviceID, int threadsPerBlock) -> bool {
       float elapsedTimeInMilliseconds = -1;
-      cudaError_t cuda_kernel_error = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, threadsPerBlock);
+      cudaError_t cuda_kernel_error = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, deviceID, threadsPerBlock);
       if (cuda_kernel_error != cudaError_t::cudaSuccess) {
         std::cerr << "Error during Kernel launch, error was '" << cudaGetErrorString(cuda_kernel_error) << "'\n";
-        return;
+        return false;
       }
 
       out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
@@ -234,23 +242,33 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
       if (maxCUDAError > 1e-5) {
         std::cerr << "Max error with CUDA execution is: " << maxCUDAError << '\n';
       }
+      return true;
     };
 
-    for (int threadsPerBlock : {1, 4, 16, 64, 256, 512}) {
-      call_cuda_kernel(threadsPerBlock);
+    for(int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
+      for(int threadsPerBlock = 0; threadsPerBlock <= maxThreadsPerBlock; ++threadsPerBlock) {
+        if(!call_cuda_kernel(gpuID, 1ull << threadsPerBlock)) {
+          goto AFTER_CUDA;
+        }
+      }
+
+      int maxPotentialBlockSize;
+      getMaxPotentialBlockSize(maxPotentialBlockSize, gpuID);
+      call_cuda_kernel(gpuID, maxPotentialBlockSize);
     }
 
+AFTER_CUDA:
     std::cout << "\n";
   }
 
 #endif
 
   // Call the OpenCL kernel
-#ifdef HAS_OPENCL
+#if 0//def HAS_OPENCL
 
   std::for_each(host_output.begin(), host_output.end(), [](float& o) { o = 0; }); // Reset the contents of the buffer that shall contain the results.
 
-  auto callOpenCLKernel = [&](cl::Device const& device, int threadsPerBlock) {
+  auto callOpenCLKernel = [&](cl::Device const& device, int threadsPerBlock) -> bool {
     cl_command_queue_properties queueProperties = CL_QUEUE_PROFILING_ENABLE;
     cl::Context context(device);
     cl::CommandQueue queue(context, device, queueProperties);
@@ -274,10 +292,10 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
     cl::Buffer deviceOff(context, CL_MEM_READ_ONLY, envSize * sizeof(size_t));
 
     error |= queue.enqueueWriteBuffer(deviceIn, CL_TRUE, 0, sizeInBytes, data.data());
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     error |= queue.enqueueWriteBuffer(deviceOff, CL_TRUE, 0, envSize * sizeof(size_t), offsets.data());
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     cl::Kernel kernel(program, "useStats");
     error |= kernel.setArg(0, deviceIn);
@@ -288,20 +306,20 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
     error |= kernel.setArg(5, dimX);
     error |= kernel.setArg(6, dimY);
     error |= kernel.setArg(7, dimZ);
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     cl::Event profileEvent;
 
     error |= queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalRange, localRange, nullptr, &profileEvent);
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     error |= queue.enqueueReadBuffer(deviceOut, CL_TRUE, 0, sizeInBytes, host_output.data());
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     // Profiling information:
     cl_ulong timeStart = profileEvent.getProfilingInfo< CL_PROFILING_COMMAND_START >(&error);
     cl_ulong timeEnd = profileEvent.getProfilingInfo< CL_PROFILING_COMMAND_END   >(&error);
-    if (error != CL_SUCCESS) return;
+    if (error != CL_SUCCESS) return false;
 
     long double elapsed = static_cast<long double>(timeEnd - timeStart);
     long double elapsedMs = elapsed * 1e-6;
@@ -315,6 +333,7 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
     if (maxOpenCLError > 1e-5) {
       std::cerr << "Max error with OpenCL execution is: " << maxOpenCLError << '\n';
     }
+    return true;
   };
 
 
@@ -358,9 +377,17 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs) {
             std::cout << "\n";
           }
 
-          for (int threadsPerBlock : {1, 4, 16, 64, 256, 512}) {
-            callOpenCLKernel(device, threadsPerBlock);
+          for(int threadsPerBlock = 0; threadsPerBlock <= maxThreadsPerBlock; ++threadsPerBlock) {
+            if(!callOpenCLKernel(device, 1ull << threadsPerBlock)) {
+              goto AFTER_OPENCL;
+            }
           }
+
+#ifdef HAS_CUDA
+          callOpenCLKernel(device, maxPotentialBlockSize);
+#endif // HAS_CUDA
+
+          AFTER_OPENCL:;
         }
       }
     }
@@ -416,12 +443,13 @@ double getMaxMemoryInGB() {
 
 int main(int argc, char** argv) {
 
-  if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <num-percentages>  <Kmin>  <Kmax>\n\n";
+  if (argc < 6) {
+    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>\n\n";
     std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
     std::cerr << "  <num-percentages>               Number of percentages of the max memory to sample. Must be bigger in [1..100], e.g. setting 2 will result in using 100% and 50%.\n";
     std::cerr << "  <Kmin>                          Minimum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <Kmax>                          Maximum environment size, must be bigger than one and odd.\n";
+    std::cerr << "  <threadsPerBlock>               Max (logarithmized) number of threads per block, e.g., 9 == 512 threads per block. The threads per block will get incremented by two each loop, i.e., [1, 4, ...]\n";
     return EXIT_FAILURE;
   }
 
@@ -437,6 +465,7 @@ int main(int argc, char** argv) {
   int _Kmax           = parseInt(argv[4]);
   int Kmin            = std::min(_Kmin, _Kmax);
   int Kmax            = std::max(_Kmin, _Kmax);
+  int maxThreadsBlock = parseInt(argv[5]);
 
 
   double maxMemoryInGB = getMaxMemoryInGB();
@@ -447,8 +476,8 @@ int main(int argc, char** argv) {
   bool firstRun = true;
   int percentageStep = 100 / numPercentages;
   for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
-    for(int K = Kmax; K >= Kmin; K -= 2) {
-      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun);
+    for(int K = Kmin; K <= Kmax; K += 2) {
+      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock);
       log << std::string(100, '=') << '\n';
       firstRun = false;
     }

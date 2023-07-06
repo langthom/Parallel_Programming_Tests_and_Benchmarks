@@ -78,13 +78,15 @@ void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, siz
   }
 }
 
-
-cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int threadsPerBlock)
+cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
 {
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
 
   cudaError_t error = cudaError_t::cudaSuccess;
+  error = cudaSetDevice(deviceID);
+  HANDLE_ERROR(error);
+
   size_t sizeInBytes = N * sizeof(float);
   size_t offsetBytes = K * K * K * sizeof(size_t);
   
@@ -163,6 +165,18 @@ cudaError_t getGPUInformation(int& nr_gpus, std::vector< std::string >& deviceNa
   }
 
   return cudaError_t::cudaSuccess;
+}
+
+cudaError_t getMaxPotentialBlockSize(int& maxPotentialBlockSize, int deviceID) {
+  cudaError_t error = cudaError_t::cudaSuccess;
+  error = cudaSetDevice(deviceID);
+  if(error != cudaError_t::cudaSuccess) {
+    return error;
+  }
+
+  int minBlocksPerGrid;
+  error = cudaOccupancyMaxPotentialBlockSize(&minBlocksPerGrid, std::addressof(maxPotentialBlockSize), useStats);
+  return error;
 }
 
 #endif // HAS_CUDA
