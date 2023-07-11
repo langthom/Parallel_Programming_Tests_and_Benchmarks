@@ -1,22 +1,92 @@
-
-#ifdef HAS_CUDA
-
-#include <map>
-#include <memory>
-#include <vector>
-#include <string>
-
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <device_launch_parameters.h>
-
-#include <CL/cl.hpp>
+/*
+ * MIT License
+ * 
+ * Copyright (c) 2023 Dr. Thomas Lang
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+**/
 
 #include "CommonKernels.h"
 
+#include <map>
+#include <vector>
+#include <string>
+
+#ifdef HAS_CUDA
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#endif // HAS_CUDA
+
+#ifdef HAS_OPENCL
+#include <CL/cl.hpp>
+#endif // HAS_OPENCL
+
+
+/* ================================================ General stuff ================================================ */
+
+double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage) {
+  constexpr size_t toGiB = 1ull << 30;
+  size_t maxMemoryInBytes = static_cast< size_t >(maxMemoryGiB * toGiB);
+
+#ifdef HAS_CUDA
+  int nr_gpus = 0;
+  std::vector< std::string > deviceNames;
+  std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
+  cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
+
+  if (error == cudaError_t::cudaSuccess) {
+    for (size_t freeMemory : availableMemoryPerDevice) {
+      maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, freeMemory);
+    }
+  }
+#endif
+
+#ifdef HAS_OPENCL
+  std::vector< cl::Platform > platforms;
+  cl::Platform::get(&platforms);
+
+  if (!platforms.empty()) {
+    for (auto const& platform : platforms) {
+      std::vector< cl::Device > devices;
+      platform.getDevices(CL_DEVICE_TYPE_ALL, &devices);
+
+      if (!devices.empty()) {
+        for (auto const& device : devices) {
+          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, device.getInfo< CL_DEVICE_GLOBAL_MEM_SIZE >());
+        }
+      }
+    }
+  }
+#endif
+
+  double maxMemoryInGB = static_cast< double >(maxMemoryInBytes) / (1ull << 30);
+  maxMemoryInGB *= actuallyUsePercentage;
+  return maxMemoryInGB;
+}
+
+/* ================================================  CUDA  stuff ================================================= */
+
+#ifdef HAS_CUDA
 
 __device__
-void stats(float* features, float* in, int globalIndex, size_t* offsets, int envSize) {
+void stats(float* features, float* in, int globalIndex, int* offsets, int envSize) {
   // This is not an efficient or even numerically stable way to compute the centralized 
   // statistical moments, but it does a few more computations and thus put some mild
   // computational load on the device.
@@ -55,9 +125,8 @@ void stats(float* features, float* in, int globalIndex, size_t* offsets, int env
   features[3] = kurtosis;
 }
 
-
 __global__
-void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
+void useStats(float* in, float* out, int* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
   int K2 = K >> 1;
   int globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
   int stride      = blockDim.x * gridDim.x;
@@ -81,7 +150,7 @@ void useStats(float* in, float* out, size_t* offsets, int const K, size_t N, siz
   }
 }
 
-cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
+cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
 {
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
@@ -91,7 +160,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K
   HANDLE_ERROR(error);
 
   size_t sizeInBytes = N * sizeof(float);
-  size_t offsetBytes = K * K * K * sizeof(size_t);
+  size_t offsetBytes = K * K * K * sizeof(int);
   
   float* device_in;
   error = cudaMalloc((void**)&device_in, sizeInBytes);
@@ -101,7 +170,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, size_t* offsets, int K
   error = cudaMalloc((void**)&device_out, sizeInBytes);
   HANDLE_ERROR_STMT(error, cudaFree(device_in));
   
-  size_t* device_offsets;
+  int* device_offsets;
   error = cudaMalloc((void**)&device_offsets, offsetBytes);
   HANDLE_ERROR_STMT(error, cudaFree(device_in); cudaFree(device_out));
 
@@ -182,12 +251,14 @@ cudaError_t getMaxPotentialBlockSize(int& maxPotentialBlockSize, int deviceID) {
   return error;
 }
 
+#endif // HAS_CUDA
 
-/* =================================================================================================================== */
+/* ================================================ OpenCL stuff ================================================= */
+#ifdef HAS_OPENCL
 
 std::string getOpenCLKernel() {
   static std::string kernel = 
-    "void stats(float* features, __global float* in, int globalIndex, __global ulong* offsets, int envSize) {\n"
+    "void stats(float* features, __global float* in, int globalIndex, __global int* offsets, int envSize) {\n"
     "  float sum = 0.f;\n\n"
     "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
     "    sum += in[globalIndex + offsets[voxelIndex]];\n"
@@ -216,7 +287,7 @@ std::string getOpenCLKernel() {
     "  features[2] = skewness;\n"
     "  features[3] = kurtosis;\n"
     "}\n\n"
-    "__kernel void useStats(__global float* in, __global float* out, __global ulong* offsets, int K, ulong N, ulong dimX, ulong dimY, ulong dimZ) {\n"
+    "__kernel void useStats(__global float* in, __global float* out, __global int* offsets, int K, ulong N, ulong dimX, ulong dimY, ulong dimZ) {\n"
     "  int K2 = K >> 1;\n"
     "  int globalIndex = get_global_id(0);\n"
     "  float features[4];\n"
@@ -236,7 +307,7 @@ std::string getOpenCLKernel() {
   return kernel;
 }
 
-std::string getOpenCLError(cl_int errorCode) {
+std::string getOpenCLError(cl_int errorCode, int line) {
   static std::map< cl_int, const char* > codes{
     {CL_SUCCESS                                  , "No error"},
     {CL_DEVICE_NOT_FOUND                         , "Device not found"},
@@ -298,7 +369,7 @@ std::string getOpenCLError(cl_int errorCode) {
     {CL_INVALID_LINKER_OPTIONS                   , "Invalid linker options"},
     {CL_INVALID_DEVICE_PARTITION_COUNT           , "Invalid device partition count"},
   };
-  return std::string("[CL] ") + codes.at(errorCode);
+  return std::string("[CL] Error at line ") + std::to_string(line) + ": " + codes.at(errorCode);
 }
 
-#endif // HAS_CUDA
+#endif // HAS_OPENCL

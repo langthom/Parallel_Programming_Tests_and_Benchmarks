@@ -1,4 +1,26 @@
-
+/*
+ * MIT License
+ * 
+ * Copyright (c) 2023 Dr. Thomas Lang
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+**/
 #define NOMINMAX
 
 #include <array>
@@ -8,28 +30,13 @@
 #include <sstream>
 #include <thread>
 
-#ifdef HAS_CUDA
-#include "../CommonKernels/CommonKernels.h"
-#endif
+#include "../Common/CommonFunctions.h"
+#include "../Common/CommonKernels.h"
 
-#ifdef HAS_OPENCL
-#include <CL/cl.hpp>
-#endif
-
-double formatMemory(double N, std::string& unit) {
-  std::array< const char*, 4 > fmts{
-    "B", "kiB", "MiB", "GiB"
-  };
-  int fmtI = 0;
-  for (; N >= 1024 && fmtI < fmts.size(); ++fmtI) {
-    N /= 1024.f;
-  }
-
-  unit = fmts[fmtI];
-  return N;
-}
 
 void readData(float* buf, size_t N) {
+  // Simulate some data reading process. This is meant to replace
+  // any hard-coded values due to the memory mapping business below.
   std::fill_n(buf, N, 1.f);
 }
 
@@ -42,17 +49,68 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
   size_t dimZ = (size_t)(memInGiB * (1ull << 30)) / (2/* in and output */ * sizeof(float) * dimY * dimX);
   size_t N = dimZ * dimY * dimX;
   size_t sizeInBytes = N * sizeof(float);
-
   size_t envSize = static_cast< size_t >(K) * K * K;
-  std::vector< size_t > offsets(envSize, 0);
-  size_t _o = 0;
-  for (int _z = -K2; _z <= K2; ++_z) {
-    for (int _y = -K2; _y <= K2; ++_y) {
-      for (int _x = -K2; _x <= K2; ++_x) {
-        offsets[_o++] = (_z * dimY + _y) * dimX + _x;
-      }
-    }
-  }
+
+  auto offsets = computeMaskOffsets(K, dimY, dimX);
+  size_t offsetBytes = offsets.size() * sizeof(int);
+
+  // ======================================== IMPORTANT NOTES =============================================== 
+  // Create the buffer for the input data, i.e., the voxel data read from file.
+  // Assume the following configuration where this was tested:
+  //    * Dell Precision Tower  (Intel i7-7700K @ 4.2GHz)
+  //    * Intel HD Graphics 630 (integrated)
+  //    * NVIDIA Quadro M4000   (discrete)
+  //    * Numeric data (e.g., 5GB of floats for both input and output)
+  // 
+  // If we would go the standard way, i.e., creating the buffer from a given host 
+  // pointer and writing it to the device, then the following happens:
+  //    1. The CPU part: Executes as planned.
+  //    2. The CUDA part (only NVIDIA GPU) -> as planned:
+  //       2.1 Data is held in CPU RAM       (5GB in RAM)
+  //       2.2 Allocation for data on device (5GB on GPU)
+  //       2.3 Execution of kernel on device
+  //       2.4 Read-out and storage in pre-allocated buffer
+  //    3. The OpenCL part (all 3 devices, the CPU, the integrated GPU and the discrete GPU)
+  //       3.1 Data is held in CPU RAM       (5GB in RAM)
+  //       3.2 Execution on NVIDIA device:
+  //             3.2.1  Execution as above.
+  //       3.3 Execution on Intel GPU and CPU via OpenCL:
+  //             3.3.1  The buffer allocation on the device allocates it
+  //                    in the CPU RAM (additional 5GB), since the CPU itself
+  //                    and the integrated card share their memory, i.e., the
+  //                    device memory regions are NOT separated.
+  // 
+  //                    In total, there would be the double memory overhead (10GB instead of 5)
+  //                    although the data is already in RAM but not "fast" accessible by the device
+  //                    (-> pinned memory), and an additional copy operation which takes some time.
+  // 
+  // So, to accomodate also the integrated devices without requiring double the memory, we make use
+  // of the mapped memory concept also available in OpenCL.
+  // Specifically, we need to allocate the cl::Buffer instances that will hold the data. Each such cl::Buffer
+  // has two parts: the CPU part and the GPU part. Now, in order to allow the driver of the integrated GPUs 
+  // (in our case the Intel driver) to make use of the zero-copy principle, i.e., to make use of the 
+  // data to be held in RAM, it is easiest[^1] to let OpenCL allocate the buffers for us.
+  // Therefore, we pass the flag CL_MEM_ALLOC_HOST_PTR, which will allocate the requested memory on the device
+  // having all the proper alignment. The allocation itself does not do anything yet.
+  // Then, we make use of the memory mapping mechanism. Specifically, we take the (OpenCL-)allocated buffer
+  // and map it into the host address space (marked for write). This yields a native pointer, into which we
+  // read the data. For the data to be accessible on the device, we must first unmap that pointer.
+  // After the kernel was executed, we aim to read out the data. For that, we also allocated such a cl::Buffer
+  // and map the result data on the device into the host address space, which again yields a native pointer
+  // which can be read from. After reading, we need to unmap it again.
+  // Using this mapped-memory business, we only need the space in RAM we would need conventionally, i.e., the
+  // input and output data, corresponding to 5GB in our example, also when executing on the integrated device.
+  //
+  // [^1] Another possible way (specific to Intel) would be to allocate the host memory part respecting a
+  //      certain alignment (currently on Intel: 4096 byte). Then the driver might recognize this special alignment
+  //      and would also go for the zero-copy version. However, the aligned allocation functions either require
+  //      special allocation functions specific to operating systems (_aligned_alloc, posix_memalign, ...),
+  //      modern concepts such as std::aligned_alloc (standard in C++17, but not on our in principle fully C++17 compatible
+  //      hardware ...), or a manual implementation keeping track of the original pointers to free them accordingly.
+  //      Still, the alignment would be compatible only/mostly to Intel.
+  //      Letting OpenCL allocate the buffers hides this problem as OpenCL gives hardware-specific implementations there.
+  //      More details: https://www.intel.com/content/www/us/en/developer/articles/training/getting-the-most-from-opencl-12-how-to-increase-performance-by-minimizing-buffer-copies-on-intel-processor-graphics.html 
+
 
   // Call the CUDA kernel
 #ifdef HAS_CUDA
@@ -73,6 +131,7 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
 
     auto call_cuda_kernel = [&](int deviceID, int threadsPerBlock) -> bool {
       float elapsedTimeInMilliseconds = -1;
+      // Launch the CUDA kernel, see the "launchKernel" function in "CommonKernels.cu" for details.
       cudaError_t cuda_kernel_error = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, deviceID, threadsPerBlock);
       if (cuda_kernel_error != cudaError_t::cudaSuccess) {
         std::stringstream errMsg;
@@ -94,9 +153,10 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
   // Call the OpenCL kernel
 #ifdef HAS_OPENCL
 
-#define HANDLE_OCL_ERROR if (error != CL_SUCCESS) { errorMsg = getOpenCLError(error); return false; }
+#define HANDLE_OCL_ERROR(line) if (error != CL_SUCCESS) { errorMsg = getOpenCLError(error, line); return false; }
 
   auto callOpenCLKernel = [&](cl::Device const& device, int threadsPerBlock) -> bool {
+    // Initialize the OpenCL stuff. This is specific to each device, thus we need to repeat this for every device.
     cl_command_queue_properties queueProperties = CL_QUEUE_PROFILING_ENABLE;
     cl::Context context(device);
     cl::CommandQueue queue(context, device, queueProperties);
@@ -111,29 +171,31 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
     cl::Program program(context, sources);
     if (program.build({ device }) != CL_SUCCESS) {
       std::stringstream errMsg;
-      errMsg << "Error while building OpenCL code: " << program.getBuildInfo< CL_PROGRAM_BUILD_LOG >(device);
+      errMsg << "[CL] Error while building OpenCL code: " << program.getBuildInfo< CL_PROGRAM_BUILD_LOG >(device);
       errorMsg = errMsg.str();
       return false;
     }
     cl_int error = CL_SUCCESS;
 
+    // See the above large comment for a description of the following mapped-memory code.
+
     cl::Buffer deviceIn( context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes, nullptr, &error);
-    HANDLE_OCL_ERROR;
+    HANDLE_OCL_ERROR(__LINE__);
     cl::Buffer deviceOut(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes, nullptr, &error);
-    HANDLE_OCL_ERROR;
-    cl::Buffer deviceOff(context, CL_MEM_READ_ONLY,  envSize * sizeof(size_t), nullptr, &error);
-    HANDLE_OCL_ERROR;
+    HANDLE_OCL_ERROR(__LINE__);
+    cl::Buffer deviceOff(context, CL_MEM_READ_ONLY,  offsetBytes, nullptr, &error);
+    HANDLE_OCL_ERROR(__LINE__);
 
     {
       float* input_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceIn, CL_TRUE, CL_MAP_WRITE, 0, sizeInBytes, nullptr, nullptr, &error));
-      HANDLE_OCL_ERROR;
+      HANDLE_OCL_ERROR(__LINE__);
       readData(input_mapped, N);
       error |= queue.enqueueUnmapMemObject(deviceIn, input_mapped);
-      HANDLE_OCL_ERROR;
+      HANDLE_OCL_ERROR(__LINE__);
     }
 
-    error |= queue.enqueueWriteBuffer(deviceOff, CL_FALSE, 0, envSize * sizeof(size_t), offsets.data());
-    HANDLE_OCL_ERROR;
+    error |= queue.enqueueWriteBuffer(deviceOff, CL_TRUE, 0, offsetBytes, offsets.data());
+    HANDLE_OCL_ERROR(__LINE__);
 
     cl::Kernel kernel(program, "useStats");
     error |= kernel.setArg(0, deviceIn);
@@ -144,14 +206,17 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
     error |= kernel.setArg(5, dimX);
     error |= kernel.setArg(6, dimY);
     error |= kernel.setArg(7, dimZ);
-    HANDLE_OCL_ERROR;
+    HANDLE_OCL_ERROR(__LINE__);
 
     error |= queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalRange, localRange);
-    HANDLE_OCL_ERROR;
+    HANDLE_OCL_ERROR(__LINE__);
+
+    error |= queue.finish();
+    HANDLE_OCL_ERROR(__LINE__);
 
     {
       float* host_output_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceOut, CL_TRUE, CL_MAP_READ, 0, sizeInBytes, nullptr, nullptr, &error));
-      HANDLE_OCL_ERROR;
+      HANDLE_OCL_ERROR(__LINE__);
 
       if(host_output_mapped[0] > 1e-5) {
         // According to our kernel, the padding area (to which this very first element belongs) must be zero.
@@ -160,7 +225,7 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
       }
 
       error |= queue.enqueueUnmapMemObject(deviceOut, host_output_mapped);
-      HANDLE_OCL_ERROR;
+      HANDLE_OCL_ERROR(__LINE__);
     }
     return true;
   };
@@ -190,47 +255,6 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
 #endif
 
   return true;
-}
-
-
-double getMaxMemoryInGB(double maxMemoryGiB) {
-  constexpr size_t toGiB = 1ull << 30;
-  size_t maxMemoryInBytes = static_cast< size_t >(maxMemoryGiB * toGiB);
-
-#ifdef HAS_CUDA
-  int nr_gpus = 0;
-  std::vector< std::string > deviceNames;
-  std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
-  cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
-
-  if (error == cudaError_t::cudaSuccess) {
-    for (size_t freeMemory : availableMemoryPerDevice) {
-      maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, freeMemory);
-    }
-  }
-#endif
-
-#ifdef HAS_OPENCL
-  std::vector< cl::Platform > platforms;
-  cl::Platform::get(&platforms);
-
-  if (!platforms.empty()) {
-    for (auto const& platform : platforms) {
-      std::vector< cl::Device > devices;
-      platform.getDevices(CL_DEVICE_TYPE_ALL, &devices);
-
-      if (!devices.empty()) {
-        for (auto const& device : devices) {
-          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, device.getInfo< CL_DEVICE_GLOBAL_MEM_SIZE >());
-        }
-      }
-    }
-  }
-#endif
-
-  double maxMemoryInGB = static_cast< double >(maxMemoryInBytes) / (1ull << 30);
-  maxMemoryInGB *= 0.90; // Need some more memory for the offsets. Do not take all of it.
-  return maxMemoryInGB;
 }
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
@@ -268,7 +292,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  maxMemory = getMaxMemoryInGB(std::max(minMemory, maxMemory));
+  maxMemory = getMaxMemoryInGiB(std::max(minMemory, maxMemory));
   double actualMinMemoryGiB = std::min(minMemory, maxMemory);
   double actualMaxMemoryGiB = std::max(minMemory, maxMemory);
   double memoryStep         = (actualMaxMemoryGiB - actualMinMemoryGiB) / numSteps;
@@ -281,6 +305,9 @@ int main(int argc, char** argv) {
   for(int step = 0; step <= numSteps; ++step) {
     if(step > 0) {
       currentMemoryGiB += memoryStep;
+
+      // Sleep for 500ms to let the GPUs relax a little bit (temperature gets high!).
+      std::this_thread::sleep_for(std::chrono::milliseconds(700));
     }
 
     std::string unit;
@@ -293,15 +320,8 @@ int main(int argc, char** argv) {
       break;
     }
 
-    // Sleep for 500ms to let the GPUs relax a little bit (temperature gets high!).
-    std::this_thread::sleep_for(std::chrono::milliseconds(700));
-
     std::cout << "done.\n";
   }
-
-  std::string unit;
-  double finalMem = formatMemory(currentMemoryGiB * (1ull << 30), unit);
-  std::cout << "[FINAL] Max usable memory before timeout is " << finalMem << ' ' << unit << '\n';
 
   return EXIT_SUCCESS;
 }
