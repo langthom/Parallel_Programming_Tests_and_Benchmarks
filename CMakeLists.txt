@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.18)
 
 project(PP_Tests_Bench)
 
+# We require C++17 for aligned storage.
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+
+
 # =================================================================================== #
 # Find OpencL
 find_package(OpenCL QUIET)
@@ -42,5 +47,6 @@ endif()
 # Process the other CMake files for building our tests and benchmarks
 
 add_subdirectory(MaskBasedProcessing_OpenCL_vs_CUDA)
+add_subdirectory(MeasureMaxUsableMemory)
 
 

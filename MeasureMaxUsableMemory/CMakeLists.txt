@@ -1,8 +1,6 @@
 
-find_package(OpenMP)
-
-set(MaskBasedProcessingTestCUDA_SRCs
-  MaskBasedProcessing_OpenCL_vs_CUDA_Main.cpp
+set(MeasureMaxUsableMemory_SRCs
+  MeasureMaxUsableMemory_Main.cpp
   ../CommonKernels/CommonKernels.h
 )
 
@@ -12,23 +10,19 @@ if(CUDA_FOUND)
   # with CMake not understanding the .cu file extension.
   # Even if it would not be included, the conditional codes in the main file as well
   # as in the header file should ensure that there are no build problems then.
-  list(APPEND MaskBasedProcessingTestCUDA_SRCs ../CommonKernels/CommonKernels.cu)
+  list(APPEND MeasureMaxUsableMemory_SRCs ../CommonKernels/CommonKernels.cu)
 endif()
 
 
 # Build the executable with all sources that shall be included
-add_executable(MaskBasedProcessingTestCUDA ${MaskBasedProcessingTestCUDA_SRCs})
+add_executable(MeasureMaxUsableMemory ${MeasureMaxUsableMemory_SRCs})
 
-
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(MaskBasedProcessingTestCUDA OpenMP::OpenMP_CXX)
-endif()
 
 if(CUDA_FOUND)
-  target_link_libraries(MaskBasedProcessingTestCUDA CUDA::cudart)
+  target_link_libraries(MeasureMaxUsableMemory CUDA::cudart)
 endif()
 
 if(OpenCL_FOUND)
-  target_link_libraries(MaskBasedProcessingTestCUDA ${OpenCL_LIBRARIES})
+  target_link_libraries(MeasureMaxUsableMemory ${OpenCL_LIBRARIES})
 endif()
 

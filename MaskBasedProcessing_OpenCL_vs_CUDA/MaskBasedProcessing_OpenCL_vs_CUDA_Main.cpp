@@ -14,7 +14,7 @@
 #include <vector>
 
 #ifdef HAS_CUDA
-#include "MaskBasedProcessing_OpenCL_vs_CUDA.h"
+#include "../CommonKernels/CommonKernels.h"
 #endif
 
 #ifdef HAS_OPENCL
@@ -77,57 +77,6 @@ inline std::array< float, 4 > stats(float* buffer, size_t* offsets, int index, i
   features[2] = skewness;
   features[3] = kurtosis;
   return features;
-}
-
-std::string getOpenCLKernel() {
-  static std::string kernel = 
-    "void stats(float* features, __global float* in, int globalIndex, __global ulong* offsets, int envSize) {\n"
-    "  float sum = 0.f;\n\n"
-    "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
-    "    sum += in[globalIndex + offsets[voxelIndex]];\n"
-    "  }\n"
-    "  float mean = sum / envSize;\n\n"
-    "  sum = 0.f;\n"
-    "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
-    "    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;\n"
-    "    sum += voxelDiff * voxelDiff;\n"
-    "  }\n"
-    "  float stdev = sqrt(sum / (envSize - 1));\n\n"
-    "  sum = 0.f;\n"
-    "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
-    "    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;\n"
-    "    sum += voxelDiff * voxelDiff * voxelDiff;\n"
-    "  }\n"
-    "  float skewness = sum / (envSize * stdev * stdev * stdev);\n\n"
-    "  sum = 0.f;\n"
-    "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
-    "    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;\n"
-    "    sum += voxelDiff * voxelDiff * voxelDiff * voxelDiff;\n"
-    "  }\n"
-    "  float kurtosis = sum / (envSize * envSize * envSize) - 3.f;\n\n"
-    "  features[0] = mean;\n"
-    "  features[1] = stdev;\n"
-    "  features[2] = skewness;\n"
-    "  features[3] = kurtosis;\n"
-    "}\n\n"
-    "__kernel void useStats(__global float* in, __global float* out, __global ulong* offsets, int K, ulong N, ulong dimX, ulong dimY, ulong dimZ) {\n"
-    "  int K2 = K >> 1;\n"
-    "  int globalIndex = get_global_id(0);\n"
-    "  float features[4];\n"
-    "  int z = globalIndex / (dimY * dimX);\n"
-    "  int j = globalIndex - z * dimY * dimX;\n"
-    "  int y = j / dimX;\n"
-    "  int x = j % dimX;\n"
-    "  bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;\n"
-    "  if (isInPadding) {\n"
-    "    out[globalIndex] = 0.f;\n"
-    "  } else {\n"
-    "    stats(features, in, globalIndex, offsets, K*K*K);\n"
-    "    out[globalIndex] = features[0];\n"
-    "  }\n"
-    "}";
-
-  return kernel;
 }
 
 void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs, int maxThreadsPerBlock) {
@@ -198,6 +147,8 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs, int ma
   std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
   cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
 
+  int maxPotentialCUDABlockSizeDev0 = 1;
+
   if (error != cudaError_t::cudaSuccess) {
     std::cerr << "Error during GPU information retrieval, error was: " << cudaGetErrorString(error) << '\n';
   } else {
@@ -252,19 +203,20 @@ void benchmark(std::ostream& out, double memInGB, int K, bool printSpecs, int ma
         }
       }
 
-      int maxPotentialBlockSize;
-      getMaxPotentialBlockSize(maxPotentialBlockSize, gpuID);
-      call_cuda_kernel(gpuID, maxPotentialBlockSize);
-    }
+      if(gpuID == 0) {
+        getMaxPotentialBlockSize(maxPotentialCUDABlockSizeDev0, gpuID);
+      }
 
-AFTER_CUDA:
-    std::cout << "\n";
+      call_cuda_kernel(gpuID, maxPotentialCUDABlockSizeDev0);
+    }
   }
+
+AFTER_CUDA:;
 
 #endif
 
   // Call the OpenCL kernel
-#if 0//def HAS_OPENCL
+#ifdef HAS_OPENCL
 
   std::for_each(host_output.begin(), host_output.end(), [](float& o) { o = 0; }); // Reset the contents of the buffer that shall contain the results.
 
@@ -273,7 +225,7 @@ AFTER_CUDA:
     cl::Context context(device);
     cl::CommandQueue queue(context, device, queueProperties);
 
-    cl::NDRange globalRange(dimX * dimY * dimZ);
+    cl::NDRange globalRange(N);
     cl::NDRange localRange(threadsPerBlock);
 
     auto kernelCode = getOpenCLKernel();
@@ -283,7 +235,7 @@ AFTER_CUDA:
     cl::Program program(context, sources);
     if (program.build({ device }) != CL_SUCCESS) {
       std::cerr << "Error while building OpenCL code: " << program.getBuildInfo< CL_PROGRAM_BUILD_LOG >(device) << '\n';
-      return;
+      return false;
     }
     cl_int error = CL_SUCCESS;
 
@@ -384,7 +336,7 @@ AFTER_CUDA:
           }
 
 #ifdef HAS_CUDA
-          callOpenCLKernel(device, maxPotentialBlockSize);
+          callOpenCLKernel(device, maxPotentialCUDABlockSizeDev0);
 #endif // HAS_CUDA
 
           AFTER_OPENCL:;
@@ -399,8 +351,9 @@ AFTER_CUDA:
 }
 
 
-double getMaxMemoryInGB() {
-  size_t maxMemoryInBytes = 8ull << 30;
+double getMaxMemoryInGB(double maxMemoryGiB) {
+  constexpr size_t toGiB = 1ull << 30;
+  size_t maxMemoryInBytes = static_cast< size_t >(maxMemoryGiB * toGiB);
 
 #ifdef HAS_CUDA
   int nr_gpus = 0;
@@ -443,9 +396,10 @@ double getMaxMemoryInGB() {
 
 int main(int argc, char** argv) {
 
-  if (argc < 6) {
-    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>\n\n";
+  if (argc < 7) {
+    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>\n\n";
     std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
+    std::cerr << "  <max-mem-in-GiB>                Maximum memory to be used on GPU in GiB (float). If the device does not have sufficient memory, this will be reduced automatically.\n";
     std::cerr << "  <num-percentages>               Number of percentages of the max memory to sample. Must be bigger in [1..100], e.g. setting 2 will result in using 100% and 50%.\n";
     std::cerr << "  <Kmin>                          Minimum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <Kmax>                          Maximum environment size, must be bigger than one and odd.\n";
@@ -458,17 +412,24 @@ int main(int argc, char** argv) {
     std::istringstream(arg) >> value;
     return value;
   };
+  
+  auto parseDouble = [](char const* arg) -> int {
+    double value;
+    std::istringstream(arg) >> value;
+    return value;
+  };
 
   std::string benchmarkLogFile = argv[1];
-  int numPercentages  = parseInt(argv[2]);
-  int _Kmin           = parseInt(argv[3]);
-  int _Kmax           = parseInt(argv[4]);
+  double maxMemoryGiB = parseDouble(argv[2]);
+  int numPercentages  = parseInt(argv[3]);
+  int _Kmin           = parseInt(argv[4]);
+  int _Kmax           = parseInt(argv[5]);
   int Kmin            = std::min(_Kmin, _Kmax);
   int Kmax            = std::max(_Kmin, _Kmax);
-  int maxThreadsBlock = parseInt(argv[5]);
+  int maxThreadsBlock = parseInt(argv[6]);
 
 
-  double maxMemoryInGB = getMaxMemoryInGB();
+  double maxMemoryInGB = getMaxMemoryInGB(maxMemoryGiB);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
 
   std::ofstream log(benchmarkLogFile);
