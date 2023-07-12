@@ -52,6 +52,23 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage) {
   std::vector< size_t > availableMemoryPerDevice, totalMemoryPerDevice;
   cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
 
+  // Note that there doesn't seem to exist a rule regarding the maximum allocation on 
+  // CUDA devices, but rather many sources recommend small sizes or an iterative approach
+  // in order to check the limit per device.
+  // But, according to some CUDA release notes[^1], the maximum size of a single allocation
+  // created by cudaMalloc or similar functions is limited to
+  // 
+  //    max( (system memory size in MB  -  512 MB )/2,  PAGING_BUFFER_SEGMENT_SIZE )
+  // 
+  // where PAGING_BUFFER_SEGMENT_SIZE is specified on Windows Vista to be roughly 2 GB.
+  // 
+  // Yet, it seems that there are really no official limits to memory allocation, and that the 
+  // OpenCL limit queried below typically lies around the range of 25% of the available memory
+  // for many common devices[^2].
+  // 
+  // [^1] https://forums.developer.nvidia.com/t/how-much-gpu-memory-can-cudamalloc-get/19796/7
+  // [^2] https://forums.developer.nvidia.com/t/why-is-cl-device-max-mem-alloc-size-never-larger-than-25-of-cl-device-global-mem-size-only-on-nvidia/47745/6 
+
   if (error == cudaError_t::cudaSuccess) {
     for (size_t freeMemory : availableMemoryPerDevice) {
       maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, freeMemory);
@@ -70,7 +87,12 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage) {
 
       if (!devices.empty()) {
         for (auto const& device : devices) {
-          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, device.getInfo< CL_DEVICE_GLOBAL_MEM_SIZE >());
+          // Note that OpenCL does not allow for the allocation of large chunks of memory, but only
+          // for a vendor-specific limit identified per device by CL_DEVICE_MAX_MEM_ALLOC_SIZE.
+          // Please also note that this size is *considerably* smaller than the available memory:
+          // On the tested device(s), the maximum available memory was about 7 GiB, yet the allocatable
+          // memory only amounted to roughly 1.3 GiB.
+          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, device.getInfo< CL_DEVICE_MAX_MEM_ALLOC_SIZE  >());
         }
       }
     }
