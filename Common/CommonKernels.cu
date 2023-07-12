@@ -24,6 +24,7 @@
 
 #include "CommonKernels.h"
 
+#include <cassert>
 #include <map>
 #include <vector>
 #include <string>
@@ -154,6 +155,11 @@ cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, s
 {
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
+
+  assert(out);
+  assert(in);
+  assert(offsets);
+  assert(elapsedTime);
 
   cudaError_t error = cudaError_t::cudaSuccess;
   error = cudaSetDevice(deviceID);

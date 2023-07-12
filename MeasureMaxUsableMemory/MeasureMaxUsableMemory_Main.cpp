@@ -306,8 +306,8 @@ int main(int argc, char** argv) {
     if(step > 0) {
       currentMemoryGiB += memoryStep;
 
-      // Sleep for 500ms to let the GPUs relax a little bit (temperature gets high!).
-      std::this_thread::sleep_for(std::chrono::milliseconds(700));
+      // Sleep for some time to let the GPUs relax a little bit (temperature gets high!).
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
     std::string unit;
