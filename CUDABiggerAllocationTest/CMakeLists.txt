@@ -40,6 +40,10 @@ endif()
 # Build the executable with all sources that shall be included
 add_executable(CUDABiggerAllocationTest ${CUDABiggerAllocationTest_SRCs})
 
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(CUDABiggerAllocationTest OpenMP::OpenMP_CXX)
+endif()
 
 if(CUDA_FOUND)
   target_link_libraries(CUDABiggerAllocationTest CUDA::cudart)
