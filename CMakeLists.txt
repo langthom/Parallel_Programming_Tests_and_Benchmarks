@@ -63,3 +63,4 @@ endif()
 # Process the other CMake files for building our tests and benchmarks
 add_subdirectory(MaskBasedProcessing_OpenCL_vs_CUDA)
 add_subdirectory(MeasureMaxUsableMemory)
+add_subdirectory(CUDABiggerAllocationTest)

@@ -40,49 +40,6 @@
 #include "../Common/CommonFunctions.h"
 #include "../Common/CommonKernels.h"
 
-inline std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K) {
-  int envSize = K * K * K;
-  std::vector< float > env(envSize);
-  for (int j = 0; j < envSize; ++j) {
-    env[j] = buffer[index + offsets[j]];
-  }
-
-  std::array< float, 4 > features;
-
-  float sum = 0.f;
-
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    sum += env[voxelIndex];
-  }
-  float mean = sum / envSize;
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = env[voxelIndex] - mean;
-    sum += voxelDiff * voxelDiff;
-  }
-  float stdev = std::sqrtf(sum / (envSize - 1));
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = env[voxelIndex] - mean;
-    sum += voxelDiff * voxelDiff * voxelDiff;
-  }
-  float skewness = sum / (envSize * stdev * stdev * stdev);
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = env[voxelIndex] - mean;
-    sum += voxelDiff * voxelDiff * voxelDiff * voxelDiff;
-  }
-  float kurtosis = sum / (envSize * stdev * stdev) - 3.f;
-
-  features[0] = mean;
-  features[1] = stdev;
-  features[2] = skewness;
-  features[3] = kurtosis;
-  return features;
-}
 
 void readData(float* buf, size_t N) {
   #pragma omp parallel for

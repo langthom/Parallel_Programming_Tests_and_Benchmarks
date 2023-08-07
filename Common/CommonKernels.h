@@ -46,8 +46,9 @@
 /// </summary>
 /// <param name="maxMemoryGiB">The maximum memory in GiB that shall be used if available.</param>
 /// <param name="actuallyUsePercentage">Multiplicative factor (percentage in [0,1]) how much actually should be used. Defaults to 90%.</param>
+/// <param name="respectOpenCLLimit">Indicator if the OpenCL limit for a single allocation should be respected.</param>
 /// <returns>Returns the maximum memory in GiB suitable for execution on the device.</returns>
-double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage = 0.90);
+double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage = 0.90, bool respectOpenCLLimit = true);
 
 /* ================================================  CUDA  stuff ================================================= */
 #ifdef HAS_CUDA

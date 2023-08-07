@@ -29,6 +29,16 @@
 #include <vector>
 
 /// <summary>
+/// Computes the CPU version of the kernel, which computes the first four central statistical moments.
+/// </summary>
+/// <param name="buffer">The buffer containing the input data.</param>
+/// <param name="offsets">The offsets for gathering the voxel values in an environment.</param>
+/// <param name="index">The linearized index to the center of the environment.</param>
+/// <param name="K">The environment side length.</param>
+/// <returns>Returns the first four centralized statistical moments in the indicated environment.</returns>
+std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K);
+
+/// <summary>
 /// Formats a memory specification from bytes into a floating point value
 /// and an according unit, e.g., it converts (1ull << 30) into  1.0 GiB.
 /// Knowing the limitations of common GPU architectures, we limit ourselves 

@@ -42,7 +42,7 @@
 
 /* ================================================ General stuff ================================================ */
 
-double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage) {
+double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage, bool respectOpenCLLimit) {
   constexpr size_t toGiB = 1ull << 30;
   size_t maxMemoryInBytes = static_cast< size_t >(maxMemoryGiB * toGiB);
 
@@ -92,7 +92,8 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage) {
           // Please also note that this size is *considerably* smaller than the available memory:
           // On the tested device(s), the maximum available memory was about 7 GiB, yet the allocatable
           // memory only amounted to roughly 1.3 GiB.
-          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, device.getInfo< CL_DEVICE_MAX_MEM_ALLOC_SIZE  >());
+          cl_ulong maxMemoryOCL = respectOpenCLLimit ? device.getInfo< CL_DEVICE_MAX_MEM_ALLOC_SIZE >() : device.getInfo< CL_DEVICE_GLOBAL_MEM_SIZE >();
+          maxMemoryInBytes = std::min< size_t >(maxMemoryInBytes, maxMemoryOCL);
         }
       }
     }
