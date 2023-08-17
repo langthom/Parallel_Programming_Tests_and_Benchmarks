@@ -22,20 +22,8 @@
 
 set(MaskBasedProcessingTestCUDA_SRCs
   MaskBasedProcessing_OpenCL_vs_CUDA_Main.cpp
-  ../Common/CommonKernels.h
-  ../Common/CommonFunctions.h
-  ../Common/CommonFunctions.cpp
+  ${Common_SRCs}
 )
-
-if(CUDA_FOUND)
-  # While also the .cu file has the preprocessor conditional in it wheter CUDA was found,
-  # we include it only conditionally in the CMake as well to avoid any potential problems
-  # with CMake not understanding the .cu file extension.
-  # Even if it would not be included, the conditional codes in the main file as well
-  # as in the header file should ensure that there are no build problems then.
-  list(APPEND MaskBasedProcessingTestCUDA_SRCs ../Common/CommonKernels.cu)
-endif()
-
 
 # Build the executable with all sources that shall be included
 add_executable(MaskBasedProcessingTestCUDA ${MaskBasedProcessingTestCUDA_SRCs})

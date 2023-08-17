@@ -33,6 +33,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+
+#include "StatisticsKernel.h"
 #endif // HAS_CUDA
 
 #ifdef HAS_OPENCL
@@ -109,71 +111,6 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage, bool
 
 #ifdef HAS_CUDA
 
-__device__
-void stats(float* features, float* in, int globalIndex, int* offsets, int envSize) {
-  // This is not an efficient or even numerically stable way to compute the centralized 
-  // statistical moments, but it does a few more computations and thus put some mild
-  // computational load on the device.
-
-  float sum = 0.f;
-
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    sum += in[globalIndex + offsets[voxelIndex]];
-  }
-  float mean = sum / envSize;
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
-    sum += voxelDiff * voxelDiff;
-  }
-  float stdev = sqrtf(sum / (envSize - 1));
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
-    sum += voxelDiff * voxelDiff * voxelDiff;
-  }
-  float skewness = sum / (envSize * stdev * stdev * stdev);
-
-  sum = 0.f;
-  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
-    float voxelDiff = in[globalIndex + offsets[voxelIndex]] - mean;
-    sum += voxelDiff * voxelDiff * voxelDiff * voxelDiff;
-  }
-  float kurtosis = sum / (envSize * stdev * stdev) - 3.f;
-
-  features[0] = mean;
-  features[1] = stdev;
-  features[2] = skewness;
-  features[3] = kurtosis;
-}
-
-__global__
-void useStats(float* in, float* out, int* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
-  int K2 = K >> 1;
-  int globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride      = blockDim.x * gridDim.x;
-
-  float features[4];
-
-  for(int i = globalIndex; i < N; i += stride) {
-    int z = i / (dimY * dimX);
-    int j = i - z * dimY * dimX;
-    int y = j / dimX;
-    int x = j % dimX;
-
-    bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;
-
-    if (isInPadding) {
-      out[i] = 0.f;
-    } else {
-      stats(features, in, i, offsets, K*K*K);
-      out[i] = features[0];
-    }
-  }
-}
-
 cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
 {
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
@@ -215,7 +152,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, s
   error = cudaEventRecord(start, 0);
   HANDLE_ERROR(error);
 
-  useStats<<< blocksPerGrid, threadsPerBlock >>>(device_in, device_out, device_offsets, K, N, dimX, dimY, dimZ);
+  statisticsKernel<<< blocksPerGrid, threadsPerBlock >>>(device_in, device_out, device_offsets, K, N, dimX, dimY, dimZ);
 
   error = cudaEventRecord(stop, 0);
   error = cudaEventSynchronize(stop);
@@ -276,7 +213,7 @@ cudaError_t getMaxPotentialBlockSize(int& maxPotentialBlockSize, int deviceID) {
   }
 
   int minBlocksPerGrid;
-  error = cudaOccupancyMaxPotentialBlockSize(&minBlocksPerGrid, std::addressof(maxPotentialBlockSize), useStats);
+  error = cudaOccupancyMaxPotentialBlockSize(&minBlocksPerGrid, std::addressof(maxPotentialBlockSize), statisticsKernel);
   return error;
 }
 

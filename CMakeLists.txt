@@ -60,7 +60,28 @@ endif()
 
 
 # =================================================================================== #
+# Define the sources shared by all targets.
+set(Common_SRCs
+  ${CMAKE_CURRENT_SOURCE_DIR}/Common/CommonFunctions.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/Common/CommonFunctions.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/Common/CommonKernels.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/Common/StatisticsKernel.h
+)
+
+if(CUDA_FOUND)
+  # While also the .cu file has the preprocessor conditional in it wheter CUDA was found,
+  # we include it only conditionally in the CMake as well to avoid any potential problems
+  # with CMake not understanding the .cu file extension.
+  # Even if it would not be included, the conditional codes in the main file as well
+  # as in the header file should ensure that there are no build problems then.
+  list(APPEND Common_SRCs ${CMAKE_CURRENT_SOURCE_DIR}/Common/CommonKernels.cu ${CMAKE_CURRENT_SOURCE_DIR}/Common/StatisticsKernel.cu)
+endif()
+
+
+
+# =================================================================================== #
 # Process the other CMake files for building our tests and benchmarks
+add_subdirectory(CUDA_MultiGPU)
+add_subdirectory(CUDABiggerAllocationTest)
 add_subdirectory(MaskBasedProcessing_OpenCL_vs_CUDA)
 add_subdirectory(MeasureMaxUsableMemory)
-add_subdirectory(CUDABiggerAllocationTest)

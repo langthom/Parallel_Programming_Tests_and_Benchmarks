@@ -20,24 +20,31 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-set(CUDABiggerAllocationTest_SRCs
-  CUDABiggerAllocationTest_Main.cpp
+if(NOT CUDA_FOUND)
+  message(WARNING "[CUDA] CUDA not detected, the multi GPU execution with CUDA will not be built!")
+  return()
+endif()
+
+set(CUDA_MultiGPU_SRCs
+  CUDA_MultiGPU.cpp
+  MultiGPUExecution.h
+  MultiGPUExecution.cu
   ${Common_SRCs}
 )
 
 # Build the executable with all sources that shall be included
-add_executable(CUDABiggerAllocationTest ${CUDABiggerAllocationTest_SRCs})
+add_executable(CUDA_MultiGPU ${CUDA_MultiGPU_SRCs})
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(CUDABiggerAllocationTest OpenMP::OpenMP_CXX)
+  target_link_libraries(CUDA_MultiGPU OpenMP::OpenMP_CXX)
 endif()
 
 if(CUDA_FOUND)
-  target_link_libraries(CUDABiggerAllocationTest CUDA::cudart)
+  target_link_libraries(CUDA_MultiGPU CUDA::cudart)
 endif()
 
 if(OpenCL_FOUND)
-  target_link_libraries(CUDABiggerAllocationTest ${OpenCL_LIBRARIES})
+  target_link_libraries(CUDA_MultiGPU ${OpenCL_LIBRARIES})
 endif()
 
