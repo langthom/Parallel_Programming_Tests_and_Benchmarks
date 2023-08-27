@@ -93,7 +93,7 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, size_t N, int* offse
   for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
     cudaStream_t& currentStream = streams[gpuID];
 
-    // allocation size which is always a multiple of slices. TODO: halos?
+    // allocation size which is always a multiple of slices.
     size_t allocationForCurrentDevice = static_cast< size_t >(totalVolumeBytes * memoryFractionsPerDevice[gpuID]);
     allocationForCurrentDevice -= allocationForCurrentDevice % sliceSize;
     if (gpuID + 1 == nr_gpus) {
@@ -135,7 +135,7 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, size_t N, int* offse
     float* deviceOff = gpuAllocations[2 * gpuID + 2];
 
     // Copy the allocation asynchronously to the devices.
-    size_t startOfCurrentChunk = std::accumulate(gpuAllocationSizes.cbegin(), gpuAllocationSizes.cbegin() + gpuID, 0ull);
+    size_t startOfCurrentChunk = std::accumulate(gpuAllocationSizes.cbegin(), gpuAllocationSizes.cbegin() + gpuID, 0ull); // TODO: Halos
     error = cudaMemcpyAsync(deviceInp, in + startOfCurrentChunk, gpuAllocationSizes[gpuID], cudaMemcpyHostToDevice, currentStream);
     error = cudaMemcpyAsync(deviceOff, offsets,                  offsetBytes,               cudaMemcpyHostToDevice, currentStream);
     HANDLE_ERROR_STMT(error, freeAllocations());

@@ -31,8 +31,7 @@
 #include <sstream>
 #include <thread>
 
-#include "../Common/CommonFunctions.h"
-#include "../Common/CommonKernels.h"
+#include "MultiGPUExecution.h"
 
 
 constexpr int minLogThreadsPerBlock() {
@@ -211,7 +210,7 @@ int main(int argc, char** argv) {
   int maxThreadsBlock = parseInt(argv[6]);
 
 
-  double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB, 0.9, false);
+  double maxMemoryInGB = getMaxAllocationSizeMultiCUDAGPU(maxMemoryGiB, 0.9);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
 
   std::ofstream log(benchmarkLogFile);
