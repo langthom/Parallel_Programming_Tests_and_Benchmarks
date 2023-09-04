@@ -38,6 +38,10 @@
 /// <returns>Returns the first four centralized statistical moments in the indicated environment.</returns>
 std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K);
 
+double cpuKernel(float* groundTruth, float* dataPtr, int* offsets, std::size_t N, int K, std::size_t dimX, std::size_t dimY, std::size_t dimZ, bool parallel);
+
+float computeMaxError(float* groundTruth, float* computedOutput, int K, size_t dimX, size_t dimY, size_t dimZ);
+
 /// <summary>
 /// Formats a memory specification from bytes into a floating point value
 /// and an according unit, e.g., it converts (1ull << 30) into  1.0 GiB.

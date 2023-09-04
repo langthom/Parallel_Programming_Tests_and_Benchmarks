@@ -25,6 +25,7 @@
 #include "CommonFunctions.h"
 
 #include <array>
+#include <chrono>
 #include <cmath> // std::sqrtf
 
 std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K) {
@@ -69,6 +70,55 @@ std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K) {
   features[2] = skewness;
   features[3] = kurtosis;
   return features;
+}
+
+
+double cpuKernel(float* groundTruth, float* dataPtr, int* offsets, std::size_t N, int K, std::size_t dimX, std::size_t dimY, std::size_t dimZ, bool parallel) {
+  int K2 = K / 2;
+  auto cpuStart = std::chrono::high_resolution_clock::now();
+
+  #pragma omp parallel for if(parallel)
+  for (long long i = 0; i < N; ++i) {
+    size_t posZ = i / (dimX * dimY);
+    size_t it   = i - posZ * dimY * dimX;
+    size_t posY = it / dimX;
+    size_t posX = it % dimX;
+    bool insidePadding = posX < K2 || posY < K2 || posZ < K2 || posX > dimX - 1 - K2 || posY > dimY - 1 - K2 || posZ > dimZ - 1 - K2;
+
+    if (!insidePadding) {
+      auto features = stats(dataPtr, offsets, i, K);
+      size_t indexWithoutPadding = ((posZ - K2) * dimY + (posY - K2)) * dimX + (posX - K2);
+      groundTruth[indexWithoutPadding] = features[0];
+    }
+  }
+
+  auto cpuEnd = std::chrono::high_resolution_clock::now();
+  auto cpuDuration = std::chrono::duration_cast< std::chrono::milliseconds >(cpuEnd - cpuStart).count();
+  return cpuDuration;
+}
+
+float computeMaxError(float* groundTruth, float* computedOutput, int K, size_t dimX, size_t dimY, size_t dimZ) {
+  int padding  = (K / 2) * 2;
+  size_t N     = (dimZ - padding) * (dimY - padding) * (dimX - padding);
+  float* inIt  = groundTruth;
+  float* outIt = computedOutput;
+  float maxError = 0.f;
+
+  #pragma omp parallel
+  {
+    float maxErrorForThisThread = 0.f;
+
+    #pragma omp for nowait
+    for (int i = 0; i < N; ++i) {
+      float absError = std::fabsf(inIt[i] - outIt[i]);
+      maxErrorForThisThread = std::fmaxf(maxErrorForThisThread, absError);
+    }
+
+    #pragma omp critical
+    maxError = std::fmaxf(maxError, maxErrorForThisThread);
+  }
+
+  return maxError;
 }
 
 double formatMemory(double N, std::string& unit) {

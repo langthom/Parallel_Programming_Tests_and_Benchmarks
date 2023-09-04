@@ -82,11 +82,10 @@ void statisticsKernel(float* in, float* out, int* offsets, int const K, size_t N
 
     bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;
 
-    if (isInPadding) {
-      out[i] = 0.f;
-    } else {
+    if (!isInPadding) {
       stats(features, in, i, offsets, K*K*K);
-      out[i] = features[0];
+      int globalIndexWithoutPadding  = ((z - K2) * dimY + (y - K2)) * dimX + (x - K2);
+      out[globalIndexWithoutPadding] = features[0];
     }
   }
 }

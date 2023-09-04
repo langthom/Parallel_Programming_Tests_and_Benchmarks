@@ -262,11 +262,10 @@ std::string getOpenCLKernel() {
     "  int y = j / dimX;\n"
     "  int x = j % dimX;\n"
     "  bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;\n"
-    "  if (isInPadding) {\n"
-    "    out[globalIndex] = 0.f;\n"
-    "  } else {\n"
+    "  if (!isInPadding) {"
     "    stats(features, in, globalIndex, offsets, K*K*K);\n"
-    "    out[globalIndex] = features[0];\n"
+    "    int globalIndexWithoutPadding  = ((z - K2) * dimY + (y - K2)) * dimX + (x - K2);\n"
+    "    out[globalIndexWithoutPadding] = features[0];\n"
     "  }\n"
     "}";
 

@@ -66,56 +66,19 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
   float _N = formatMemory(sizeInBytes, unit);
   std::cout << "Using " << N << " elements, corresponding to " << (2 * _N) << " " << unit << " overall; Using regions of size " << K << " x " << K << " x " << K << ".\n";
 
-  std::vector< float > groundTruth(N, 0);
+  size_t pad = K2 * 2;
+  size_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
+  std::vector< float > groundTruth(sizeWithoutPadding, 0);
 
-  // Baseline: OpenMP-parallelized implementation
+  // Baseline: Single threaded and OpenMP-parallelized CPU implementation
   {
     std::vector< float > data(N, 0);
     readData(data.data(), N);
-    float* dataPtr = data.data();
-    auto cpuStart = std::chrono::high_resolution_clock::now();
-
-    #pragma omp parallel for
-    for (long long i = 0; i < N; ++i) {
-      size_t posZ = i / (dimX * dimY);
-      size_t it = i - posZ * dimY * dimX;
-      size_t posY = it / dimX;
-      size_t posX = it % dimX;
-
-      if (posX < K2 || posY < K2 || posZ < K2 || posX > dimX - 1 - K2 || posY > dimY - 1 - K2 || posZ > dimZ - 1 - K2) {
-        groundTruth[i] = 0.f;
-      } else {
-        auto features = stats(dataPtr, offsets.data(), i, K);
-        groundTruth[i] = features[0];
-      }
-    }
-
-    auto cpuEnd = std::chrono::high_resolution_clock::now();
-    auto cpuDuration = std::chrono::duration_cast<std::chrono::milliseconds>(cpuEnd - cpuStart).count();
+    double cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, false);
+    out << memInGiB << ',' << K << ',' << cpuDuration;
+    cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, true);
     out << memInGiB << ',' << K << ',' << cpuDuration;
   }
-
-  auto computeMaxError = [&groundTruth, N](float* host_output) -> float {
-    float maxError = 0.f;
-    float* outIt = host_output;
-    float* inIt = groundTruth.data();
-
-    #pragma omp parallel
-    {
-      float maxErrorForThisThread = 0.f;
-
-      #pragma omp for nowait
-      for (int i = 0; i < N; ++i) {
-        float absError = std::fabsf(inIt[i] - outIt[i]);
-        maxErrorForThisThread = std::fmaxf(maxErrorForThisThread, absError);
-      }
-
-      #pragma omp critical
-      maxError = std::fmaxf(maxError, maxErrorForThisThread);
-    }
-
-    return maxError;
-  };
 
   // Call the CUDA kernel
 #ifdef HAS_CUDA
@@ -129,7 +92,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
     return;
   } else {
     std::vector< float > data(N, 0);
-    std::vector< float > host_output(N, 0);
+    std::vector< float > host_output(groundTruth.size(), 0);
     readData(data.data(), N);
 
     auto call_cuda_kernel = [&](int deviceID, int threadsPerBlock) -> bool {
@@ -142,7 +105,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
 
       out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
 
-      float maxCUDAError = computeMaxError(host_output.data());
+      float maxCUDAError = computeMaxError(groundTruth.data(), host_output.data(), K, dimX, dimY, dimZ);
       if (maxCUDAError > 1e-5) {
         std::cerr << "[CUDA]   *** Max error with CUDA execution is: " << maxCUDAError << '\n';
         return false;
