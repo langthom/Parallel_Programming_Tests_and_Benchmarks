@@ -103,8 +103,6 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, size_t N, int* offse
 
   assert(out); assert(in); assert(offsets); assert(elapsedTime);
 
-  size_t totalDeviceMem = 0; // DELME
-
   cudaError_t error = cudaError_t::cudaSuccess;
   int nr_gpus = 0;
 
@@ -193,32 +191,23 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, size_t N, int* offse
 
     auto const& zPartition = partitioning[gpuID];
     float* dataInBegin  =  in + zPartition.first * sliceSizeBytes;
-    float* dataOutBegin = out + (zPartition.first + padding) * sliceSizeBytes;
+    float* dataOutBegin = out + zPartition.first * sliceSizeBytes;
 
     error = cudaMemcpyAsync(deviceDataIn,  dataInBegin, inputBytes,  cudaMemcpyHostToDevice, currentStream);
     error = cudaMemcpyAsync(deviceOffsets, offsets,     offsetBytes, cudaMemcpyHostToDevice, currentStream);
-    HANDLE_ERROR_STMT(error, freeAllocations(); std::cout << "async fwd-copy error at " << __LINE__ << "\n");
+    HANDLE_ERROR_STMT(error, freeAllocations());
 
     int blocksPerGrid = (inputBytes / sizeof(float) + threadsPerBlock - 1) / threadsPerBlock;
     statisticsKernel<<< blocksPerGrid, threadsPerBlock, 0, currentStream >>>(deviceDataIn, deviceDataOut, deviceOffsets, K, N, dimX, dimY, dimZ);
 
-    error = cudaMemcpy(dataOutBegin, deviceDataOut, outputBytes, cudaMemcpyDeviceToHost);
-    //error = cudaMemcpyAsync(dataOutBegin, deviceOutBeg, dataOutCopySize, cudaMemcpyDeviceToHost, currentStream);
+    //error = cudaMemcpy(dataOutBegin, deviceDataOut, outputBytes, cudaMemcpyDeviceToHost);
+    error = cudaMemcpyAsync(dataOutBegin, deviceDataOut, outputBytes, cudaMemcpyDeviceToHost, currentStream);
     HANDLE_ERROR_STMT(error, freeAllocations(); std::cout << "async back-copy error at " << __LINE__ << "\n");
   }
 
   cudaEventRecord(stopEvent);
   cudaEventSynchronize(stopEvent);
   cudaEventElapsedTime(elapsedTime, startEvent, stopEvent);
-
-  // TODO: necessary?
-  for (int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
-    error = cudaSetDevice(gpuID);
-    error = cudaStreamSynchronize(streams[gpuID]);
-    HANDLE_ERROR_STMT(error, freeAllocations());
-  }
-
-
 
   freeAllocations();
 
