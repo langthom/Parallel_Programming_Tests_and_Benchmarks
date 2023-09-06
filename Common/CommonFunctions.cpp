@@ -28,7 +28,7 @@
 #include <chrono>
 #include <cmath> // std::sqrtf
 
-std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K) {
+std::array< float, 4 > stats(float* buffer, int64_t* offsets, int64_t index, int K) {
   int envSize = K * K * K;
   std::vector< float > env(envSize);
   for (int j = 0; j < envSize; ++j) {
@@ -72,22 +72,24 @@ std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K) {
   return features;
 }
 
-
-double cpuKernel(float* groundTruth, float* dataPtr, int* offsets, std::size_t N, int K, std::size_t dimX, std::size_t dimY, std::size_t dimZ, bool parallel) {
+double cpuKernel(float* groundTruth, float* dataPtr, int64_t* offsets, int64_t N, int K, int64_t dimX, int64_t dimY, int64_t dimZ, bool parallel) {
   int K2 = K / 2;
   auto cpuStart = std::chrono::high_resolution_clock::now();
 
+  int64_t dimY_withoutPadding = dimY - K + 1;
+  int64_t dimX_withoutPadding = dimX - K + 1;
+
   #pragma omp parallel for if(parallel)
-  for (long long i = 0; i < N; ++i) {
-    size_t posZ = i / (dimX * dimY);
-    size_t it   = i - posZ * dimY * dimX;
-    size_t posY = it / dimX;
-    size_t posX = it % dimX;
+  for (int64_t i = 0; i < N; ++i) {
+    int64_t posZ = i / (dimX * dimY);
+    int64_t it   = i - posZ * dimY * dimX;
+    int64_t posY = it / dimX;
+    int64_t posX = it % dimX;
     bool insidePadding = posX < K2 || posY < K2 || posZ < K2 || posX > dimX - 1 - K2 || posY > dimY - 1 - K2 || posZ > dimZ - 1 - K2;
 
     if (!insidePadding) {
       auto features = stats(dataPtr, offsets, i, K);
-      size_t indexWithoutPadding = ((posZ - K2) * dimY + (posY - K2)) * dimX + (posX - K2);
+      int64_t indexWithoutPadding = ((posZ - K2) * dimY_withoutPadding + (posY - K2)) * dimX_withoutPadding + (posX - K2);
       groundTruth[indexWithoutPadding] = features[0];
     }
   }
@@ -97,9 +99,7 @@ double cpuKernel(float* groundTruth, float* dataPtr, int* offsets, std::size_t N
   return cpuDuration;
 }
 
-float computeMaxError(float* groundTruth, float* computedOutput, int K, size_t dimX, size_t dimY, size_t dimZ) {
-  int padding  = (K / 2) * 2;
-  size_t N     = (dimZ - padding) * (dimY - padding) * (dimX - padding);
+float computeMaxError(float* groundTruth, float* computedOutput, int64_t bufferSize) {
   float* inIt  = groundTruth;
   float* outIt = computedOutput;
   float maxError = 0.f;
@@ -109,7 +109,7 @@ float computeMaxError(float* groundTruth, float* computedOutput, int K, size_t d
     float maxErrorForThisThread = 0.f;
 
     #pragma omp for nowait
-    for (int i = 0; i < N; ++i) {
+    for (int64_t i = 0; i < bufferSize; ++i) {
       float absError = std::fabsf(inIt[i] - outIt[i]);
       maxErrorForThisThread = std::fmaxf(maxErrorForThisThread, absError);
     }
@@ -134,16 +134,15 @@ double formatMemory(double N, std::string& unit) {
   return N;
 }
 
-
-std::vector< int > computeMaskOffsets(int envSize, std::size_t dimY, std::size_t dimX) {
-  std::size_t voxelsInEnvironment = static_cast< std::size_t >(envSize) * envSize * envSize;
-  std::vector< int > offsets(voxelsInEnvironment, 0);
+std::vector< int64_t > computeMaskOffsets(int envSize, std::size_t dimY, std::size_t dimX) {
+  int64_t voxelsInEnvironment = static_cast< int64_t >(envSize) * envSize * envSize;
+  std::vector< int64_t > offsets(voxelsInEnvironment, 0);
   int K2 = envSize / 2;
-  std::size_t _o = 0;
+  int64_t _o = 0;
 
-  for (int _z = -K2; _z <= K2; ++_z) {
-    for (int _y = -K2; _y <= K2; ++_y) {
-      for (int _x = -K2; _x <= K2; ++_x) {
+  for (int64_t _z = -K2; _z <= K2; ++_z) {
+    for (int64_t _y = -K2; _y <= K2; ++_y) {
+      for (int64_t _x = -K2; _x <= K2; ++_x) {
         offsets[_o++] = (_z * dimY + _y) * dimX + _x;
       }
     }

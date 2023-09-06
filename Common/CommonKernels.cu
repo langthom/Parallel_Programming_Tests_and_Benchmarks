@@ -111,7 +111,7 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage, bool
 
 #ifdef HAS_CUDA
 
-cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
+cudaError_t launchKernel(float* out, float* in, int64_t N, int64_t* offsets, int K, int64_t dimX, int64_t dimY, int64_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
 {
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
@@ -126,7 +126,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, s
   HANDLE_ERROR(error);
 
   size_t sizeInBytes = N * sizeof(float);
-  size_t offsetBytes = K * K * K * sizeof(int);
+  size_t offsetBytes = K * K * K * sizeof(int64_t);
   
   float* device_in;
   error = cudaMalloc((void**)&device_in, sizeInBytes);
@@ -136,7 +136,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, s
   error = cudaMalloc((void**)&device_out, sizeInBytes);
   HANDLE_ERROR_STMT(error, cudaFree(device_in));
   
-  int* device_offsets;
+  int64_t* device_offsets;
   error = cudaMalloc((void**)&device_offsets, offsetBytes);
   HANDLE_ERROR_STMT(error, cudaFree(device_in); cudaFree(device_out));
 
@@ -144,7 +144,7 @@ cudaError_t launchKernel(float* out, float* in, size_t N, int* offsets, int K, s
   error = cudaMemcpy(device_offsets, offsets, offsetBytes, cudaMemcpyHostToDevice);
   HANDLE_ERROR(error);
 
-  int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+  int64_t blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
   cudaEvent_t start, stop;
   error = cudaEventCreate(&start);
@@ -224,7 +224,8 @@ cudaError_t getMaxPotentialBlockSize(int& maxPotentialBlockSize, int deviceID) {
 
 std::string getOpenCLKernel() {
   static std::string kernel = 
-    "void stats(float* features, __global float* in, int globalIndex, __global int* offsets, int envSize) {\n"
+    "typedef long int64_t;\n\n"
+    "void stats(float* features, __global float* in, int64_t globalIndex, __global int64_t* offsets, int envSize) {\n"
     "  float sum = 0.f;\n\n"
     "  for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {\n"
     "    sum += in[globalIndex + offsets[voxelIndex]];\n"
@@ -253,18 +254,20 @@ std::string getOpenCLKernel() {
     "  features[2] = skewness;\n"
     "  features[3] = kurtosis;\n"
     "}\n\n"
-    "__kernel void useStats(__global float* in, __global float* out, __global int* offsets, int K, ulong N, ulong dimX, ulong dimY, ulong dimZ) {\n"
+    "__kernel void useStats(__global float* in, __global float* out, __global int64_t* offsets, int K, int64_t N, int64_t dimX, int64_t dimY, int64_t dimZ) {\n"
     "  int K2 = K >> 1;\n"
-    "  int globalIndex = get_global_id(0);\n"
+    "  int64_t globalIndex = get_global_id(0);\n"
+    "  int64_t dimY_withoutPadding = dimY - K + 1;\n"
+    "  int64_t dimX_withoutPadding = dimX - K + 1;\n"
     "  float features[4];\n"
-    "  int z = globalIndex / (dimY * dimX);\n"
-    "  int j = globalIndex - z * dimY * dimX;\n"
-    "  int y = j / dimX;\n"
-    "  int x = j % dimX;\n"
+    "  int64_t z = globalIndex / (dimY * dimX);\n"
+    "  int64_t j = globalIndex - z * dimY * dimX;\n"
+    "  int64_t y = j / dimX;\n"
+    "  int64_t x = j % dimX;\n"
     "  bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;\n"
     "  if (!isInPadding) {"
     "    stats(features, in, globalIndex, offsets, K*K*K);\n"
-    "    int globalIndexWithoutPadding  = ((z - K2) * dimY + (y - K2)) * dimX + (x - K2);\n"
+    "    int64_t globalIndexWithoutPadding  = ((z - K2) * dimY_withoutPadding + (y - K2)) * dimX_withoutPadding + (x - K2);\n"
     "    out[globalIndexWithoutPadding] = features[0];\n"
     "  }\n"
     "}";

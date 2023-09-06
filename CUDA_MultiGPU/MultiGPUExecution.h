@@ -30,7 +30,7 @@
 double getMaxAllocationSizeMultiCUDAGPU(double maxMemoryInGiB, double actuallyUsePercentage = 0.9);
 
 
-cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, size_t N, int* offsets, int K, size_t dimX, size_t dimY, size_t dimZ, float* elapsedTime, int threadsPerBlock);
+cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* offsets, int K, int64_t dimX, int64_t dimY, int64_t dimZ, float* elapsedTime, int threadsPerBlock);
 
 #endif // HAS_CUDA
 

@@ -24,6 +24,8 @@
 
 #ifdef HAS_CUDA
 
+using int64_t = long long;
+
 /// <summary>
 /// The statistics kernel computing the first four standardized statistical moments in a single local region
 /// centered around the voxel indexed by the \a globalIndex and of side length \a envSize.
@@ -34,7 +36,7 @@
 /// <param name="offsets">Offsets array specifying how to jump around in the 3D volume.</param>
 /// <param name="envSize">The environment side length.</param>
 __device__
-void stats(float* features, float* in, int globalIndex, int* offsets, int envSize);
+void stats(float* features, float* in, int64_t globalIndex, int64_t* offsets, int envSize);
 
 /// <summary>
 /// </summary>
@@ -48,6 +50,6 @@ void stats(float* features, float* in, int globalIndex, int* offsets, int envSiz
 /// <param name="dimY">The secondary volume dimension.</param>
 /// <param name="dimZ">The primary volume dimension.</param>
 __global__
-void statisticsKernel(float* in, float* out, int* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ);
+void statisticsKernel(float* in, float* out, int64_t* offsets, int K, int64_t N, int64_t dimX, int64_t dimY, int64_t dimZ);
 
 #endif // HAS_CUDA

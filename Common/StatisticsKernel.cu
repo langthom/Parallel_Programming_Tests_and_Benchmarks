@@ -27,7 +27,7 @@
 #ifdef HAS_CUDA
 
 __device__
-void stats(float* features, float* in, int globalIndex, int* offsets, int envSize) {
+void stats(float* features, float* in, int64_t globalIndex, int64_t* offsets, int envSize) {
   // This is not an efficient or even numerically stable way to compute the centralized 
   // statistical moments, but it does a few more computations and thus put some mild
   // computational load on the device.
@@ -67,24 +67,27 @@ void stats(float* features, float* in, int globalIndex, int* offsets, int envSiz
 }
 
 __global__
-void statisticsKernel(float* in, float* out, int* offsets, int const K, size_t N, size_t dimX, size_t dimY, size_t dimZ) {
+void statisticsKernel(float* in, float* out, int64_t* offsets, int K, int64_t N, int64_t dimX, int64_t dimY, int64_t dimZ) {
   int K2 = K >> 1;
-  int globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride      = blockDim.x * gridDim.x;
+  int64_t globalIndex = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t stride      = blockDim.x * gridDim.x;
+
+  int64_t dimY_withoutPadding = dimY - K + 1;
+  int64_t dimX_withoutPadding = dimX - K + 1;
 
   float features[4];
 
-  for(int i = globalIndex; i < N; i += stride) {
-    int z = i / (dimY * dimX);
-    int j = i - z * dimY * dimX;
-    int y = j / dimX;
-    int x = j % dimX;
+  for(int64_t i = globalIndex; i < N; i += stride) {
+    int64_t z = i / (dimY * dimX);
+    int64_t j = i - z * dimY * dimX;
+    int64_t y = j / dimX;
+    int64_t x = j % dimX;
 
     bool isInPadding = x < K2 || y < K2 || z < K2 || x > dimX - 1 - K2 || y > dimY - 1 - K2 || z > dimZ - 1 - K2;
 
     if (!isInPadding) {
       stats(features, in, i, offsets, K*K*K);
-      int globalIndexWithoutPadding  = ((z - K2) * dimY + (y - K2)) * dimX + (x - K2);
+      int64_t globalIndexWithoutPadding  = ((z - K2) * dimY_withoutPadding + (y - K2)) * dimX_withoutPadding + (x - K2);
       out[globalIndexWithoutPadding] = features[0];
     }
   }

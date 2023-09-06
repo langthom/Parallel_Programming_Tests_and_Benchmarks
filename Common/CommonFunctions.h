@@ -28,6 +28,8 @@
 #include <string>
 #include <vector>
 
+using int64_t = long long;
+
 /// <summary>
 /// Computes the CPU version of the kernel, which computes the first four central statistical moments.
 /// </summary>
@@ -36,11 +38,31 @@
 /// <param name="index">The linearized index to the center of the environment.</param>
 /// <param name="K">The environment side length.</param>
 /// <returns>Returns the first four centralized statistical moments in the indicated environment.</returns>
-std::array< float, 4 > stats(float* buffer, int* offsets, int index, int K);
+std::array< float, 4 > stats(float* buffer, int64_t* offsets, int64_t index, int K);
 
-double cpuKernel(float* groundTruth, float* dataPtr, int* offsets, std::size_t N, int K, std::size_t dimX, std::size_t dimY, std::size_t dimZ, bool parallel);
+/// <summary>
+/// Applies the CPU kernel over the dataset, possibly parallel.
+/// </summary>
+/// <param name="groundTruth">Pointer to the output buffer, must be properly allocated.</param>
+/// <param name="dataPtr">Pointer to the input data.</param>
+/// <param name="offsets">The computed offsets for jumping.</param>
+/// <param name="N">The total number of voxels in the input volume.</param>
+/// <param name="K">The environment side length.</param>
+/// <param name="dimX">The tertiary dimension of the volume.</param>
+/// <param name="dimY">The secondary dimension of the volume.</param>
+/// <param name="dimZ">The primary dimension of the volume.</param>
+/// <param name="parallel">Indicator if the execution should be parallel (via OpenMP) or not.</param>
+/// <returns>Returns the elapsed time in milliseconds.</returns>
+double cpuKernel(float* groundTruth, float* dataPtr, int64_t* offsets, int64_t N, int K, int64_t dimX, int64_t dimY, int64_t dimZ, bool parallel);
 
-float computeMaxError(float* groundTruth, float* computedOutput, int K, size_t dimX, size_t dimY, size_t dimZ);
+/// <summary>
+/// Computes the maximum absolute pointwise error between the \a groundTruth and the \a computedOutput.
+/// </summary>
+/// <param name="groundTruth">The ground truth to compare against.</param>
+/// <param name="computedOutput">The computed output to compare.</param>
+/// <param name="bufferSize">The size of both buffers in elements/voxels.</param>
+/// <returns>Returns the maximum absolute poitnwise error.</returns>
+float computeMaxError(float* groundTruth, float* computedOutput, int64_t bufferSize);
 
 /// <summary>
 /// Formats a memory specification from bytes into a floating point value
@@ -76,7 +98,7 @@ double formatMemory(double memory, std::string& unit);
 /// <param name="dimY">The secondary dimension of the linearized volume.</param>
 /// <param name="dimX">The tertiary dimension of the linearized volume.</param>
 /// <returns>A vector containing the computed offsets.</returns>
-std::vector< int > computeMaskOffsets(int envSize, std::size_t dimY, std::size_t dimX); 
+std::vector< int64_t > computeMaskOffsets(int envSize, std::size_t dimY, std::size_t dimX); 
 
 
 #endif // Parallel_Programming_Tests__CommonFunctions__H

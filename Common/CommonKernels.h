@@ -72,12 +72,12 @@ double getMaxMemoryInGiB(double maxMemoryGiB, double actuallyUsePercentage = 0.9
 /// <returns>An error code, if any.</returns>
 cudaError_t launchKernel(float* out,
                          float* in,
-                         size_t N,
-                         int* offsets,
+                         int64_t N,
+                         int64_t* offsets,
                          int K,
-                         size_t dimX,
-                         size_t dimY,
-                         size_t dimZ,
+                         int64_t dimX,
+                         int64_t dimY,
+                         int64_t dimZ,
                          float* elapsedTimeInMilliseconds,
                          int deviceID,
                          int threadsPerBlock);
