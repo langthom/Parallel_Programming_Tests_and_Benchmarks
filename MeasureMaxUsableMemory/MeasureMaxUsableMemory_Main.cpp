@@ -41,18 +41,21 @@ void readData(float* buf, size_t N) {
 }
 
 bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
+  constexpr double toGiB = 1ull << 30;
   int K2 = K >> 1;
   int E = 9;
 
-  size_t dimX = 1ull << E;
-  size_t dimY = 1ull << E;
-  size_t dimZ = (size_t)(memInGiB * (1ull << 30)) / (2/* in and output */ * sizeof(float) * dimY * dimX);
-  size_t N = dimZ * dimY * dimX;
-  size_t sizeInBytes = N * sizeof(float);
-  size_t envSize = static_cast< size_t >(K) * K * K;
+  int pad = K - 1;
+  int64_t dimX = 1ull << E;
+  int64_t dimY = 1ull << E;
+  int64_t dimZ = static_cast< int64_t >(memInGiB * toGiB / (2.0/* in and output */ * sizeof(float) * dimY * dimX));
+  int64_t N = dimZ * dimY * dimX;
+  int64_t sizeInBytes = N * sizeof(float);
+  int64_t envSize = static_cast< size_t >(K) * K * K;
+  int64_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad);
 
   auto offsets = computeMaskOffsets(K, dimY, dimX);
-  size_t offsetBytes = offsets.size() * sizeof(int);
+  int64_t offsetBytes = offsets.size() * sizeof(int64_t);
 
   // ======================================== IMPORTANT NOTES =============================================== 
   // Create the buffer for the input data, i.e., the voxel data read from file.
@@ -125,8 +128,9 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
     errorMsg = errMsg.str();
     return false;
   } else {
+    int pad = K - 1;
     std::vector< float > data(N, 0);
-    std::vector< float > host_output(N, 0);
+    std::vector< float > host_output(sizeWithoutPadding, 0);
     readData(data.data(), N);
 
     auto call_cuda_kernel = [&](int deviceID, int threadsPerBlock) -> bool {
@@ -181,7 +185,7 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
 
     cl::Buffer deviceIn( context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes, nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
-    cl::Buffer deviceOut(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes, nullptr, &error);
+    cl::Buffer deviceOut(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeWithoutPadding * sizeof(float), nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
     cl::Buffer deviceOff(context, CL_MEM_READ_ONLY,  offsetBytes, nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
@@ -215,12 +219,12 @@ bool testTimeout(double memInGiB, int K, std::string& errorMsg) {
     HANDLE_OCL_ERROR(__LINE__);
 
     {
-      float* host_output_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceOut, CL_TRUE, CL_MAP_READ, 0, sizeInBytes, nullptr, nullptr, &error));
+      float* host_output_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceOut, CL_TRUE, CL_MAP_READ, 0, sizeWithoutPadding * sizeof(float), nullptr, nullptr, &error));
       HANDLE_OCL_ERROR(__LINE__);
 
-      if(host_output_mapped[0] > 1e-5) {
-        // According to our kernel, the padding area (to which this very first element belongs) must be zero.
-        errorMsg = "[CL] The very first value should have been zero!";
+      if(std::fabs(host_output_mapped[0] - 1.f) > 1e-5) {
+        // According to our kernel, which omits the padding, the very first value must be 1 given our data.
+        errorMsg = "[CL] The very first value should have been 1!";
         return false;
       }
 

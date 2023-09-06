@@ -49,25 +49,27 @@ void readData(float* buf, size_t N) {
 }
 
 void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock) {
+  constexpr double toGiB = 1ull << 30;
   int K2 = K >> 1;
   int E = 9;
 
-  size_t dimX = 1ull << E;
-  size_t dimY = 1ull << E;
-  size_t dimZ = (size_t)(memInGiB * (1ull << 30)) / (2/* in and output */ * sizeof(float) * dimY * dimX);
-  size_t N = dimZ * dimY * dimX;
-  size_t sizeInBytes = N * sizeof(float);
-  size_t envSize = static_cast<size_t>(K) * K * K;
+  int64_t dimX = 1ull << E;
+  int64_t dimY = 1ull << E;
+  int64_t dimZ = static_cast< int64_t >(memInGiB * toGiB / (2.0/* in and output */ * sizeof(float) * dimY * dimX));
+  int64_t N = dimZ * dimY * dimX;
+  int64_t sizeInBytes = N * sizeof(float);
+  int envSize = static_cast<size_t>(K) * K * K;
 
   auto offsets = computeMaskOffsets(K, dimY, dimX);
-  size_t offsetBytes = offsets.size() * sizeof(int);
+  size_t offsetBytes = offsets.size() * sizeof(int64_t);
 
   std::string unit;
   float _N = formatMemory(sizeInBytes, unit);
-  std::cout << "Using " << N << " elements, corresponding to " << (2 * _N) << " " << unit << " overall; Using regions of size " << K << " x " << K << " x " << K << ".\n";
+  std::cout << "Using block of dimensions " << dimX << " x " << dimY << " x " << dimZ << " (" << (2 * _N) << " " << unit << " overall); "
+            << "Using regions of size " << K << " x " << K << " x " << K << ".\n";
 
-  size_t pad = K2 * 2;
-  size_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
+  int pad = K2 * 2;
+  int64_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
   std::vector< float > groundTruth(sizeWithoutPadding, 0);
 
   // Baseline: Single threaded and OpenMP-parallelized CPU implementation
@@ -105,7 +107,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
 
       out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
 
-      float maxCUDAError = computeMaxError(groundTruth.data(), host_output.data(), K, dimX, dimY, dimZ);
+      float maxCUDAError = computeMaxError(groundTruth.data(), host_output.data(), groundTruth.size());
       if (maxCUDAError > 1e-5) {
         std::cerr << "[CUDA]   *** Max error with CUDA execution is: " << maxCUDAError << '\n';
         return false;
@@ -165,14 +167,13 @@ int main(int argc, char** argv) {
   };
 
   std::string benchmarkLogFile = argv[1];
-  double maxMemoryGiB = parseDouble(argv[2]);
-  int numPercentages = parseInt(argv[3]);
-  int _Kmin = parseInt(argv[4]);
-  int _Kmax = parseInt(argv[5]);
-  int Kmin = std::min(_Kmin, _Kmax);
-  int Kmax = std::max(_Kmin, _Kmax);
-  int maxThreadsBlock = parseInt(argv[6]);
-
+  double maxMemoryGiB          = parseDouble(argv[2]);
+  int numPercentages           = parseInt(argv[3]);
+  int _Kmin                    = parseInt(argv[4]);
+  int _Kmax                    = parseInt(argv[5]);
+  int Kmin                     = std::min(_Kmin, _Kmax);
+  int Kmax                     = std::max(_Kmin, _Kmax);
+  int maxThreadsBlock          = parseInt(argv[6]);
 
   double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB, 0.9, false);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
@@ -184,7 +185,7 @@ int main(int argc, char** argv) {
   for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
     for (int K = Kmin; K <= Kmax; K += 2) {
       benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock);
-      log << std::string(100, '=') << '\n';
+      log << '\n';
       firstRun = false;
 
       // Sleep for some time to let the GPUs relax a little bit (temperature gets high!).

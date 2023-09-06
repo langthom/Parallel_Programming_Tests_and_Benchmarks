@@ -125,8 +125,10 @@ cudaError_t launchKernel(float* out, float* in, int64_t N, int64_t* offsets, int
   error = cudaSetDevice(deviceID);
   HANDLE_ERROR(error);
 
-  size_t sizeInBytes = N * sizeof(float);
-  size_t offsetBytes = K * K * K * sizeof(int64_t);
+  int pad = K - 1;
+  int64_t sizeInBytes  = N * sizeof(float);
+  int64_t sizeOutBytes = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
+  int64_t offsetBytes  = K * K * K * sizeof(int64_t);
   
   float* device_in;
   error = cudaMalloc((void**)&device_in, sizeInBytes);
@@ -162,7 +164,7 @@ cudaError_t launchKernel(float* out, float* in, int64_t N, int64_t* offsets, int
   error = cudaDeviceSynchronize();
   HANDLE_ERROR(error);
 
-  error = cudaMemcpy(out, device_out, sizeInBytes, cudaMemcpyDeviceToHost);
+  error = cudaMemcpy(out, device_out, sizeOutBytes, cudaMemcpyDeviceToHost);
   HANDLE_ERROR(error);
 
   error = cudaFree(device_in);
