@@ -31,7 +31,7 @@
 #include <sstream>
 #include <thread>
 
-#include "MultiGPUExecution.h"
+#include "../Common/MultiGPUExecution.h"
 #include "../Common/CommonFunctions.h"
 #include "../Common/CommonKernels.h"
 

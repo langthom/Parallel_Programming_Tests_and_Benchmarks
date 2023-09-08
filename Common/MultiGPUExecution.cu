@@ -26,11 +26,11 @@
 #include <cassert>
 #include <numeric>
 #include "MultiGPUExecution.h"
-#include "../Common/CommonKernels.h"
+#include "CommonKernels.h"
 
 #ifdef HAS_CUDA
 
-#include "../Common/StatisticsKernel.h"
+#include "StatisticsKernel.h"
 
 double getMaxAllocationSizeMultiCUDAGPU(double maxMemoryInGiB, double actuallyUsePercentage) {
   constexpr size_t toGiB = 1ull << 30;

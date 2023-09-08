@@ -25,26 +25,26 @@ if(NOT CUDA_FOUND)
   return()
 endif()
 
-set(CUDA_MultiGPU_SRCs
-  CUDA_MultiGPU.cpp
+set(Application_CUDAMultiGPU_SRCs
+  Application_CUDAMultiGPU.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../Common/MultiGPUExecution.h
   ${CMAKE_CURRENT_SOURCE_DIR}/../Common/MultiGPUExecution.cu
   ${Common_SRCs}
 )
 
 # Build the executable with all sources that shall be included
-add_executable(CUDA_MultiGPU ${CUDA_MultiGPU_SRCs})
+add_executable(Application_CUDAMultiGPU ${Application_CUDAMultiGPU_SRCs})
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(CUDA_MultiGPU OpenMP::OpenMP_CXX)
+  target_link_libraries(Application_CUDAMultiGPU OpenMP::OpenMP_CXX)
 endif()
 
 if(CUDA_FOUND)
-  target_link_libraries(CUDA_MultiGPU CUDA::cudart)
+  target_link_libraries(Application_CUDAMultiGPU CUDA::cudart)
 endif()
 
 if(OpenCL_FOUND)
-  target_link_libraries(CUDA_MultiGPU ${OpenCL_LIBRARIES})
+  target_link_libraries(Application_CUDAMultiGPU ${OpenCL_LIBRARIES})
 endif()
 
