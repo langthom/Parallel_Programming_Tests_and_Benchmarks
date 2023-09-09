@@ -95,7 +95,7 @@ double cpuKernel(float* groundTruth, float* dataPtr, int64_t* offsets, int64_t N
   }
 
   auto cpuEnd = std::chrono::high_resolution_clock::now();
-  auto cpuDuration = std::chrono::duration_cast< std::chrono::milliseconds >(cpuEnd - cpuStart).count();
+  double cpuDuration = std::chrono::duration< double, std::milli >(cpuEnd - cpuStart).count(); // fractional milliseconds;
   return cpuDuration;
 }
 
