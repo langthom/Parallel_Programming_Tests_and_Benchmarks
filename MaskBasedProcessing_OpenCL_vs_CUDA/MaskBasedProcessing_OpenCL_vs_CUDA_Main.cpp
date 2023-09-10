@@ -41,9 +41,9 @@
 #include "../Common/CommonKernels.h"
 
 
-void readData(float* buf, size_t N) {
+void readData(float* buf, int64_t N) {
   #pragma omp parallel for
-  for(int i = 0; i < static_cast< int >(N); ++i) {
+  for(int64_t i = 0; i < N; ++i) {
     buf[i] = i % 65536;
   }
 }
@@ -55,7 +55,7 @@ constexpr int minLogThreadsPerBlock() {
   return 4;
 }
 
-void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock) {
+void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock, bool measureSingleThreaded) {
   constexpr double toGiB = 1ull << 30;
   int K2 = K >> 1;
   int E = 9;
@@ -63,6 +63,12 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
   int64_t dimX = 1ull << E;
   int64_t dimY = 1ull << E;
   int64_t dimZ = static_cast< int64_t >(memInGiB * toGiB / (2.0/* in and output */ * sizeof(float) * dimY * dimX));
+
+  // For OpenCLs requirement about the global workgroup size (here dimX*dimY*dimZ) being evenly divisible by the local workgroup size
+  // (here the number of threads per block given as logaritmized value in inMaxThreadsPerBlock), round down to the nearest power of
+  // two of the given max thread number per block.
+  dimZ = 1ull << static_cast< int64_t >(std::log2(dimZ));
+
   int64_t N = dimZ * dimY * dimX;
   int64_t sizeInBytes = N * sizeof(float);
   int envSize = K * K * K;
@@ -159,17 +165,21 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
             << "Using regions of size " << K << " x " << K << " x " << K << ".\n";
 
   int pad = K2 * 2;
-  int64_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
+  int64_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad);
   std::vector< float > groundTruth(sizeWithoutPadding, 0);
 
   // Baseline: Single threaded and OpenMP-parallelized CPU implementation
   {
     std::vector< float > data(N, 0);
     readData(data.data(), N);
-    double cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, false);
-    out << memInGiB << ',' << K << ',' << cpuDuration;
+    out << memInGiB << ',';
+    double cpuDuration;
+    if (measureSingleThreaded) {
+      cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, false);
+      out << K << ',' << cpuDuration << ',';
+    }
     cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, true);
-    out << memInGiB << ',' << K << ',' << cpuDuration;
+    out << K << ',' << cpuDuration;
   }
 
   // Call the CUDA kernel
@@ -180,7 +190,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
   cudaError_t error = getGPUInformation(nr_gpus, deviceNames, availableMemoryPerDevice, totalMemoryPerDevice);
 
   if (error != cudaError_t::cudaSuccess) {
-    std::cout << "[CUDA] Error during GPU information retrieval, error was: " << cudaGetErrorString(error);
+    std::cerr << "[CUDA] Error during GPU information retrieval, error was: " << cudaGetErrorString(error);
     return;
   } else {
     std::vector< float > data(N, 0);
@@ -209,9 +219,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
     int maxThreadsPerBlock = std::max(minLogThreadsPerBlock(), inMaxThreadsPerBlock);
     for(int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
       for(int threadsPerBlock = minThreadsPerBlock; threadsPerBlock <= maxThreadsPerBlock; ++threadsPerBlock) {
-        if(!call_cuda_kernel(gpuID, 1ull << threadsPerBlock)) {
-          goto AFTER_CUDA;
-        }
+        call_cuda_kernel(gpuID, 1ull << threadsPerBlock);
       }
 
       int maxPotentialCUDABlockSize = 1;
@@ -223,10 +231,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
       }
     }
   }
-
-AFTER_CUDA:;
-
-#endif
+#endif // HAS_CUDA
 
   // Call the OpenCL kernel
 #ifdef HAS_OPENCL
@@ -255,24 +260,14 @@ AFTER_CUDA:;
 
     // See the large comment in "MeasureMaxUsableMemory_Main.cpp" for a description of the following mapped-memory code.
 
-    cl::Buffer deviceIn( context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes, nullptr, &error);
+    cl::Buffer deviceIn( context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes,                        nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
     cl::Buffer deviceOut(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeWithoutPadding * sizeof(float), nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
     cl::Buffer deviceOff(context, CL_MEM_READ_ONLY,  offsetBytes, nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
 
-    {
-      float* input_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceIn, CL_TRUE, CL_MAP_WRITE, 0, sizeInBytes, nullptr, nullptr, &error));
-      HANDLE_OCL_ERROR(__LINE__);
-      readData(input_mapped, N);
-      error |= queue.enqueueUnmapMemObject(deviceIn, input_mapped);
-      HANDLE_OCL_ERROR(__LINE__);
-    }
-
-    error |= queue.enqueueWriteBuffer(deviceOff, CL_TRUE, 0, offsetBytes, offsets.data());
-    HANDLE_OCL_ERROR(__LINE__);
-
+    // Prepare the kernel.
     cl::Kernel kernel(program, "useStats");
     error |= kernel.setArg(0, deviceIn);
     error |= kernel.setArg(1, deviceOut);
@@ -284,41 +279,51 @@ AFTER_CUDA:;
     error |= kernel.setArg(7, dimZ);
     HANDLE_OCL_ERROR(__LINE__);
 
-    cl::Event profileEvent;
 
-    error |= queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalRange, localRange, nullptr, &profileEvent);
+    std::vector< float > host_output(groundTruth.size(), 0);
+    std::vector< float > data(N, 0);
+    readData(data.data(), N);
+
+    // The timing start for the execution of the memory transfer and the kernel execution.
+    // As the data reading operation is expensive, we assume copying memory already in host RAM
+    // to the device, but now by means of memory mapping. This means more memory consumption than
+    // directly reading the data to the memory mapped block, but this would imply a non-fair 
+    // comparison between the CUDA part and the OpenCL part.
+    // 
+    // Furthermore, since we know use the regular enqueueWriteBuffer approach, we want to make the
+    // comparison fairer by placing these calls asynchronously (!). The kernel launch itself should
+    // also run asynchronously. The final enqueueReadBuffer command is blocking, which does the final
+    // synchronization and allows for a CPU timing instead of using different events.
+    // 
+    // Note that we use CPU code here since the blocks below are all *blocking*.
+    auto oclExecStart = std::chrono::high_resolution_clock::now();
+
+    // Write data from host to device (asynchronous).
+    error |= queue.enqueueWriteBuffer(deviceIn,  CL_FALSE, 0, sizeInBytes, data.data());
+    error |= queue.enqueueWriteBuffer(deviceOff, CL_FALSE, 0, offsetBytes, offsets.data());
     HANDLE_OCL_ERROR(__LINE__);
 
-    error |= queue.finish();
+    // Call the kernel actually.
+    error |= queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalRange, localRange);
     HANDLE_OCL_ERROR(__LINE__);
 
-    {
-      float* host_output_mapped = static_cast< float* >(queue.enqueueMapBuffer(deviceOut, CL_TRUE, CL_MAP_READ, 0, sizeWithoutPadding * sizeof(float), nullptr, nullptr, &error));
-      HANDLE_OCL_ERROR(__LINE__);
+    // Read data from device to host (blocking!).
+    error |= queue.enqueueReadBuffer(deviceOut, CL_TRUE, 0, sizeWithoutPadding * sizeof(float), host_output.data());
+    HANDLE_OCL_ERROR(__LINE__);
 
-      // Profiling information:
-      cl_ulong timeStart = profileEvent.getProfilingInfo< CL_PROFILING_COMMAND_START >(&error);
-      cl_ulong timeEnd   = profileEvent.getProfilingInfo< CL_PROFILING_COMMAND_END   >(&error);
-      HANDLE_OCL_ERROR(__LINE__);
+    // Profiling information:
+    auto oclExecEnd = std::chrono::high_resolution_clock::now();
+    double elapsedMs = std::chrono::duration< double, std::milli >(oclExecEnd - oclExecStart).count();
+    out << ',' << threadsPerBlock << ',' << elapsedMs;
 
-      long double elapsed = static_cast<long double>(timeEnd - timeStart);
-      long double elapsedMs = elapsed * 1e-6;
-      out << ',' << threadsPerBlock << ',' << elapsedMs;
-
-      float maxOpenCLError = computeMaxError(groundTruth.data(), host_output_mapped, groundTruth.size());
-      if (maxOpenCLError > 1e-5) {
-        std::cerr << "[CL] Max error with OpenCL execution is: " << maxOpenCLError << '\n';
-        return false;
-      }
-
-      error |= queue.enqueueUnmapMemObject(deviceOut, host_output_mapped);
-      HANDLE_OCL_ERROR(__LINE__);
+    float maxOpenCLError = computeMaxError(groundTruth.data(), host_output.data(), sizeWithoutPadding);
+    if (maxOpenCLError > 1e-5) {
+      std::cerr << "[CL] Max error with OpenCL execution is: " << maxOpenCLError << '\n';
+      return false;
     }
 
-#undef HANDLE_OCL_ERROR
     return true;
   };
-
 
   std::vector< cl::Platform > platforms;
   cl::Platform::get(&platforms);
@@ -336,28 +341,23 @@ AFTER_CUDA:;
       if (!devices.empty()) {
         for (auto const& device : devices) {
           for(int threadsPerBlock = minThreadsPerBlock; threadsPerBlock <= maxThreadsPerBlock; ++threadsPerBlock) {
-            if (!callOpenCLKernel(device, 1ull << threadsPerBlock)) {
-              goto AFTER_OPENCL;
-            }
+            callOpenCLKernel(device, 1ull << threadsPerBlock);
           }
 
           // For the OpenCL invocation, we do NOT test the maximum potential CUDA block size.
           // The reason is, that the function "enqueueNDRangeKernel" requires that the global work group
           // size (in our case the number of elements) is evenly divisible (i.e., without remainder) by
           // the local group size. For the powers of two in the loop above, this should work.
-          // However, the max. potential CUDA block size need not be a power of two. In our tested case,
-          // it was 768, and the global size was not evenly divisible.
+          // However, the max. potential CUDA block size need not be a power of two. In one of our tested cases,
+          // it was 768, and the global size was not evenly divisible by that.
           // Therefore, we do not test this and ignore this.
-
-          AFTER_OPENCL:;
         }
       }
     }
   }
+#undef HANDLE_OCL_ERROR
 
-  out << '\n';
-
-#endif
+#endif // HAS_OPENCL
 }
 
 
@@ -365,14 +365,15 @@ AFTER_CUDA:;
 
 int main(int argc, char** argv) {
 
-  if (argc < 7) {
-    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>\n\n";
+  if (argc < 8) {
+    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>  <measure-single-threaded-CPU>\n\n";
     std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
     std::cerr << "  <max-mem-in-GiB>                Maximum memory to be used on GPU in GiB (float). If the device does not have sufficient memory, this will be reduced automatically.\n";
     std::cerr << "  <num-percentages>               Number of percentages of the max memory to sample. Must be bigger in [1..100], e.g. setting 2 will result in using 100% and 50%.\n";
     std::cerr << "  <Kmin>                          Minimum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <Kmax>                          Maximum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <threadsPerBlock>               Max (logarithmized) number of threads per block, e.g., 9 == 512 threads per block. The threads per block will get incremented by two each loop, i.e., [1, 4, ...]\n";
+    std::cerr << "  <measure-single-threaded-CPU>   Indicator if the single threaded CPU execution shall be measured as well. Will be done if argument is 'y'.\n";
     return EXIT_FAILURE;
   }
 
@@ -389,14 +390,14 @@ int main(int argc, char** argv) {
   };
 
   std::string benchmarkLogFile = argv[1];
-  double maxMemoryGiB = parseDouble(argv[2]);
-  int numPercentages  = parseInt(argv[3]);
-  int _Kmin           = parseInt(argv[4]);
-  int _Kmax           = parseInt(argv[5]);
-  int Kmin            = std::min(_Kmin, _Kmax);
-  int Kmax            = std::max(_Kmin, _Kmax);
-  int maxThreadsBlock = parseInt(argv[6]);
-
+  double maxMemoryGiB           = parseDouble(argv[2]);
+  int numPercentages            = parseInt(argv[3]);
+  int _Kmin                     = parseInt(argv[4]);
+  int _Kmax                     = parseInt(argv[5]);
+  int Kmin                      = std::min(_Kmin, _Kmax);
+  int Kmax                      = std::max(_Kmin, _Kmax);
+  int maxThreadsBlock           = parseInt(argv[6]);
+  bool measureSingleThreadedCPU = argv[7][0] == 'y';
 
   double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
@@ -407,8 +408,8 @@ int main(int argc, char** argv) {
   int percentageStep = 100 / numPercentages;
   for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
     for(int K = Kmin; K <= Kmax; K += 2) {
-      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock);
-      log << std::string(100, '=') << '\n';
+      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock, measureSingleThreadedCPU);
+      log << '\n';
       firstRun = false;
 
       // Sleep for some time to let the GPUs relax a little bit (temperature gets high!).

@@ -142,29 +142,27 @@ cudaError_t launchKernel(float* out, float* in, int64_t N, int64_t* offsets, int
   error = cudaMalloc((void**)&device_offsets, offsetBytes);
   HANDLE_ERROR_STMT(error, cudaFree(device_in); cudaFree(device_out));
 
+  // Create events for timing the code. This shall include also the memory transfer to be 
+  // comparable with the multi GPU and CPU approaches.
+  cudaEvent_t start, stop;
+  error = cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
+  error = cudaEventCreateWithFlags(&stop,  cudaEventBlockingSync);
+  error = cudaEventRecord(start);
+  HANDLE_ERROR(error);
+
   error = cudaMemcpy(device_in,           in, sizeInBytes, cudaMemcpyHostToDevice);
   error = cudaMemcpy(device_offsets, offsets, offsetBytes, cudaMemcpyHostToDevice);
   HANDLE_ERROR(error);
 
   int64_t blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
-
-  cudaEvent_t start, stop;
-  error = cudaEventCreate(&start);
-  error = cudaEventCreate(&stop);
-  error = cudaEventRecord(start, 0);
-  HANDLE_ERROR(error);
-
   statisticsKernel<<< blocksPerGrid, threadsPerBlock >>>(device_in, device_out, device_offsets, K, N, dimX, dimY, dimZ);
 
-  error = cudaEventRecord(stop, 0);
+  error = cudaMemcpy(out, device_out, sizeOutBytes, cudaMemcpyDeviceToHost);
+  HANDLE_ERROR(error);
+
+  error = cudaEventRecord(stop);
   error = cudaEventSynchronize(stop);
   error = cudaEventElapsedTime(elapsedTime, start, stop);
-  HANDLE_ERROR(error);
-
-  error = cudaDeviceSynchronize();
-  HANDLE_ERROR(error);
-
-  error = cudaMemcpy(out, device_out, sizeOutBytes, cudaMemcpyDeviceToHost);
   HANDLE_ERROR(error);
 
   error = cudaFree(device_in);

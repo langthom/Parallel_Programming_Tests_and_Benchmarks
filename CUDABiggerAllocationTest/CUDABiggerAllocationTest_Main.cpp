@@ -48,7 +48,7 @@ void readData(float* buf, size_t N) {
   std::fill_n(buf, N, 1.f);
 }
 
-void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock) {
+void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock, bool measureSingleThreadedCPU) {
   constexpr double toGiB = 1ull << 30;
   int K2 = K >> 1;
   int E = 9;
@@ -76,10 +76,14 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
   {
     std::vector< float > data(N, 0);
     readData(data.data(), N);
-    double cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, false);
-    out << memInGiB << ',' << K << ',' << cpuDuration;
+    out << memInGiB << ',';
+    double cpuDuration;
+    if (measureSingleThreadedCPU) {
+      cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, false);
+      out << K << ',' << cpuDuration << ',';
+    }
     cpuDuration = cpuKernel(groundTruth.data(), data.data(), offsets.data(), N, K, dimX, dimY, dimZ, true);
-    out << memInGiB << ',' << K << ',' << cpuDuration;
+    out << K << ',' << cpuDuration;
   }
 
   // Call the CUDA kernel
@@ -143,14 +147,15 @@ AFTER_CUDA:;
 
 int main(int argc, char** argv) {
 
-  if (argc < 7) {
-    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>\n\n";
+  if (argc < 8) {
+    std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax>  <threadsPerBlock>  <measure-single-threaded-CPU>\n\n";
     std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
     std::cerr << "  <max-mem-in-GiB>                Maximum memory to be used on GPU in GiB (float). If the device does not have sufficient memory, this will be reduced automatically.\n";
     std::cerr << "  <num-percentages>               Number of percentages of the max memory to sample. Must be bigger in [1..100], e.g. setting 2 will result in using 100% and 50%.\n";
     std::cerr << "  <Kmin>                          Minimum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <Kmax>                          Maximum environment size, must be bigger than one and odd.\n";
     std::cerr << "  <threadsPerBlock>               Max (logarithmized) number of threads per block, e.g., 9 == 512 threads per block. The threads per block will get incremented by two each loop, i.e., [1, 4, ...]\n";
+    std::cerr << "  <measure-single-threaded-CPU>   Indicator if the single threaded CPU execution shall be measured as well. Will be done if argument is 'y'.\n";
     return EXIT_FAILURE;
   }
 
@@ -166,14 +171,15 @@ int main(int argc, char** argv) {
     return value;
   };
 
-  std::string benchmarkLogFile = argv[1];
-  double maxMemoryGiB          = parseDouble(argv[2]);
-  int numPercentages           = parseInt(argv[3]);
-  int _Kmin                    = parseInt(argv[4]);
-  int _Kmax                    = parseInt(argv[5]);
-  int Kmin                     = std::min(_Kmin, _Kmax);
-  int Kmax                     = std::max(_Kmin, _Kmax);
-  int maxThreadsBlock          = parseInt(argv[6]);
+  std::string benchmarkLogFile  = argv[1];
+  double maxMemoryGiB           = parseDouble(argv[2]);
+  int numPercentages            = parseInt(argv[3]);
+  int _Kmin                     = parseInt(argv[4]);
+  int _Kmax                     = parseInt(argv[5]);
+  int Kmin                      = std::min(_Kmin, _Kmax);
+  int Kmax                      = std::max(_Kmin, _Kmax);
+  int maxThreadsBlock           = parseInt(argv[6]);
+  bool measureSingleThreadedCPU = argv[7][0] == 'y';
 
   double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB, 0.9, false);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n";
@@ -184,7 +190,7 @@ int main(int argc, char** argv) {
   int percentageStep = 100 / numPercentages;
   for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
     for (int K = Kmin; K <= Kmax; K += 2) {
-      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock);
+      benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock, measureSingleThreadedCPU);
       log << '\n';
       firstRun = false;
 
