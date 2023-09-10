@@ -258,11 +258,9 @@ void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int i
     }
     cl_int error = CL_SUCCESS;
 
-    // See the large comment in "MeasureMaxUsableMemory_Main.cpp" for a description of the following mapped-memory code.
-
-    cl::Buffer deviceIn( context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeInBytes,                        nullptr, &error);
+    cl::Buffer deviceIn( context, CL_MEM_READ_WRITE, sizeInBytes,                        nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
-    cl::Buffer deviceOut(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeWithoutPadding * sizeof(float), nullptr, &error);
+    cl::Buffer deviceOut(context, CL_MEM_READ_WRITE, sizeWithoutPadding * sizeof(float), nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
     cl::Buffer deviceOff(context, CL_MEM_READ_ONLY,  offsetBytes, nullptr, &error);
     HANDLE_OCL_ERROR(__LINE__);
