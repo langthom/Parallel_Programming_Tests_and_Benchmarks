@@ -55,19 +55,46 @@ constexpr int minLogThreadsPerBlock() {
   return 4;
 }
 
-void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock, bool measureSingleThreaded) {
+std::tuple< int64_t, int64_t, int64_t > getDims(double memInGiB, int alignmentZ = 0) {
   constexpr double toGiB = 1ull << 30;
-  int K2 = K >> 1;
-  int E = 9;
-
-  int64_t dimX = 1ull << E;
-  int64_t dimY = 1ull << E;
+  int64_t dimX = 1ull << 9;
+  int64_t dimY = 1ull << 9;
   int64_t dimZ = static_cast< int64_t >(memInGiB * toGiB / (2.0/* in and output */ * sizeof(float) * dimY * dimX));
 
-  // For OpenCLs requirement about the global workgroup size (here dimX*dimY*dimZ) being evenly divisible by the local workgroup size
-  // (here the number of threads per block given as logaritmized value in inMaxThreadsPerBlock), round down to the nearest power of
-  // two of the given max thread number per block.
-  dimZ = 1ull << static_cast< int64_t >(std::log2(dimZ));
+  if (alignmentZ > 0) {
+    dimZ -= dimZ % (1ll << alignmentZ);
+  }
+
+  return { dimX, dimY, dimZ };
+}
+
+int correctMaxThreadsPerBlock(double memInGiB, int maxLogThreadsPerBlock) {
+  // Given a user provided maximum number of threads per block, this might yield alignment issues
+  // with OpenCL as this requires the global workgroup size (here: dimZ * dimY * dimX) to be 
+  // evenly divisible by the local range (here: the number of threads per block).
+  // Since we also calculate the maximum usable memory, we must NOT pad up.
+  // Instead, we reduce the maximum number of threads per block until the overall number of elements is
+  // evenly divisible by it and report this to the user.
+
+  auto dims = getDims(memInGiB);
+  int64_t dimZ = std::get< 2 >(dims);
+
+  for (; maxLogThreadsPerBlock >= minLogThreadsPerBlock(); --maxLogThreadsPerBlock) {
+    int64_t threadsPerBlock = 1ll << maxLogThreadsPerBlock;
+    int64_t roundDown = dimZ - (dimZ & (threadsPerBlock - 1ll));
+    if (roundDown != 0) {
+      break;
+    }
+  }
+
+  return maxLogThreadsPerBlock;
+}
+
+void benchmark(std::ostream& out, double memInGiB, int K, bool printSpecs, int inMaxThreadsPerBlock, bool measureSingleThreaded) {
+  int K2 = K >> 1;
+
+  int64_t dimX, dimY, dimZ;
+  std::tie(dimX, dimY, dimZ) = getDims(memInGiB, inMaxThreadsPerBlock);
 
   int64_t N = dimZ * dimY * dimX;
   int64_t sizeInBytes = N * sizeof(float);
@@ -404,6 +431,15 @@ int main(int argc, char** argv) {
 
   bool firstRun = true;
   int percentageStep = 100 / numPercentages;
+
+  double minMemory = maxMemoryInGB * (100. - static_cast< double >(numPercentages-1.0) * percentageStep) / 100.;
+  int _oldMaxThreads = maxThreadsBlock;
+  maxThreadsBlock = correctMaxThreadsPerBlock(minMemory, maxThreadsBlock);
+  if (_oldMaxThreads != maxThreadsBlock) {
+    std::cout << "[INFO]  Correction: Using " << maxThreadsBlock << " threads/block at max instead of " << _oldMaxThreads << " for OpenCL alignment reasons\n";
+  }
+  std::cout << '\n';
+
   for (int percentage = 100; percentage >= 1; percentage -= percentageStep) {
     for(int K = Kmin; K <= Kmax; K += 2) {
       benchmark(log, percentage / 100.0 * maxMemoryInGB, K, firstRun, maxThreadsBlock, measureSingleThreadedCPU);
