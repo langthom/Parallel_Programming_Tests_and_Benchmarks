@@ -1,12 +1,15 @@
 
 import os
 import re
+import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 
 BENCHMARK_TYPES = ['CUDA vs OpenCL', 'CUDA Allocation Size', 'CUDA Multi-GPU']
 
-BASE_LINE_METHOD = 'OpenMP'
+def set_baseline(baseline):
+  global BASE_LINE_METHOD
+  BASE_LINE_METHOD = baseline
 
 def parse_files(csvs):
   def __get_benchmark_type(csv_filename):
@@ -116,6 +119,10 @@ def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, co
     'throughput': 'GiB/s'
   }[computation_criterion]
   
+  title_infix = {
+    'speedup'   : f"over {BASE_LINE_METHOD} CPU execution",
+    'throughput': ""
+  }[computation_criterion]
   
   plt.figure(figsize=(15,10))
   
@@ -138,9 +145,9 @@ def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, co
       plt.fill_between(threads_per_block, np.maximum(computed_values_avg-computed_values_std, 0), computed_values_avg+computed_values_std, alpha=0.25)
   
   
-  plt.title(f"CUDA {computation_criterion}s over {BASE_LINE_METHOD} CPU execution\n(device: {gpu_name}; averaged over {averaging_over})")
+  plt.title(f"CUDA {computation_criterion}s {title_infix}\n(device: {gpu_name}; averaged over {averaging_over})")
   plt.xticks(threads_per_block)
-  plt.ylim([max(min_value - 5, 0), max_value + 5])
+  plt.ylim([max(min_value * 0.95, 0), max_value * 1.05])
   plt.xlabel("threads/block")
   plt.ylabel(f"{computation_criterion} [{computation_unit}]")
   plt.legend()
@@ -153,6 +160,55 @@ def plot_CUDA_over_threads_per_block(gpu_name, configurations):
     plot_over_threads_per_block(gpu_name, configuration, 'sizes', 'speedup')
     plot_over_threads_per_block(gpu_name, configuration, 'K',     'throughput')
     plot_over_threads_per_block(gpu_name, configuration, 'sizes', 'throughput')
+
+
+def plot_CUDA_one_size_over_threads_per_block(gpu_name, configurations):
+  def __plot_multiple_K_lines(configuration, computation_criterion):
+    computation_function = {
+      'speedup'   : lambda baseline, exec_times,      _: np.true_divide(baseline[:,np.newaxis], exec_times),
+      'throughput': lambda        _, exec_times, memory: np.true_divide(  memory[:,np.newaxis], exec_times / 1000.0)
+    }[computation_criterion]
+    
+    computation_unit = {
+      'speedup'   : 'x',
+      'throughput': 'GiB/s'
+    }[computation_criterion]
+
+    title_infix = {
+      'speedup'   : f"over {BASE_LINE_METHOD} CPU execution",
+      'throughput': ""
+    }[computation_criterion]
+    
+    threads_per_block = [ tpb for tpb, _ in configuration['executions'][0]['gpu'] ]
+    Ks                = np.unique(extract('Ks',    configuration))
+    target_size       = np.min(extract('sizes', configuration)) # only do the plot for the largest size
+
+    plt.figure(figsize=(15,10))
+    
+    min_value, max_value = float('inf'), 0
+    for K in Ks:
+      selection_function = lambda e: abs(e['size_in_GiB'] - target_size) < 1e-5 and e['K'] == K
+      baseline_time = extract('baseline',  configuration, selection_function)
+      exec_times    = extract('gpu_times', configuration, selection_function)
+      sizes         = extract('sizes',     configuration, selection_function)
+      
+      computed_values = computation_function(baseline_time, exec_times, sizes)[0,...]
+      min_value = min(min_value, np.min(computed_values))
+      max_value = max(max_value, np.max(computed_values))
+      
+      plt.plot(threads_per_block, computed_values, label=f"K = {K}")
+    
+    plt.title(f"CUDA {computation_criterion}s {title_infix}\n(device: {gpu_name}; processing {np.around(target_size, decimals=1)} GiB)")
+    plt.xticks(threads_per_block)
+    plt.ylim([max(min_value * 0.95, 0), max_value * 1.05])
+    plt.xlabel("threads/block")
+    plt.ylabel(f"{computation_criterion} [{computation_unit}]")
+    plt.legend()
+    plt.savefig(f"{configuration['device_name']}_{computation_criterion}_singleSize_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+
+  for configuration in configurations:
+    __plot_multiple_K_lines(configuration, 'speedup')
+    __plot_multiple_K_lines(configuration, 'throughput')
 
 
 # -------------------------------------------------------------------------------------------------
@@ -192,7 +248,7 @@ def plot_multiGPU_speedups(gpu_name, configuration_pairs):
     }[selection_criterion]
     
     fill_std = {
-      'K'    : True,
+      'K'    : False,#True,
       'sizes': False
     }[selection_criterion]
 
@@ -214,7 +270,6 @@ def plot_multiGPU_speedups(gpu_name, configuration_pairs):
       if fill_std:
         plt.fill_between(threads_per_block, np.maximum(computed_values_avg-computed_values_std, 0), computed_values_avg+computed_values_std, alpha=0.25)
     
-    print(f"min/max: {min_value} / {max_value}")
     plt.title(f"Multi-GPU speedups (CUDA) over single GPU execution\n(device: {gpu_name}; averaged over {averaging_over})")
     plt.xticks(threads_per_block)
     plt.ylim([max(min_value * 0.95, 0), max_value * 1.05])
@@ -238,22 +293,36 @@ def plot_comparison(configurations):
 if __name__ == '__main__':
   import sys
   if len(sys.argv) < 2:
-    print(f"Usage: {sys.argv[0]} <gpu-name> <path-to-csv> [<path-to-csv>...]")
+    print(f"Usage: {sys.argv[0]} <gpu-name> <baseline> <path-to-csv> [<path-to-csv>...]")
     exit(1)
 
-  gpu_name       = sys.argv[1]
-  configurations = parse_files(sys.argv[2:])
+  gpu_name = sys.argv[1]
+  set_baseline(sys.argv[2])
+  configurations = parse_files(sys.argv[3:])
   
   # 1. plot the speedups and the throughputs for the CUDA case only
+  print("Plotting the CUDA speedups and throughputs                                    ... ", end="")
   relevant_configurations = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[1], configurations)
-  #plot_CUDA_over_threads_per_block(gpu_name, relevant_configurations)
+  plot_CUDA_over_threads_per_block(gpu_name, relevant_configurations)
+  print("done.")
   
-  # 2. multi GPU case:
-  #    2.1 plot the speeups of multi GPU execution over the single gpu (bigger allocation) case
+  # 2. plot the speedups and throughputs without averaging, i.e., plot multiple lines (one for each K), for the largest sizes only (CUDA only)
+  print("Plotting the speedups and throughputs for the largest size only               ... ", end="")
+  relevant_configurations = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[1], configurations)
+  plot_CUDA_one_size_over_threads_per_block(gpu_name, relevant_configurations)
+  print("done.")
+  
+  # 3. multi GPU case:
+  #    3.1 plot the individual speedups and throughputs of the multi GPU case
+  print("Plotting the speedups and throughputs of the multi-GPU execution              ... ", end="")
+  multi_gpu_configs = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[2], configurations)
+  plot_CUDA_over_threads_per_block(gpu_name, multi_gpu_configs)
+  print("done.")
+  
+  #    3.2 plot the speeups of multi GPU execution over the single gpu (bigger allocation) case
+  print("Plotting the speedups of the multi-GPU execution vs. the single GPU benchmark ... ", end="")
   multi_GPU_speedup_config_pairs = pair_up_multiGPU_configurations(configurations)
   plot_multiGPU_speedups(gpu_name, multi_GPU_speedup_config_pairs)
+  print("done.")
   
-  #    2.2 plot the individual speedups and throughputs of the multi GPU case
-  multi_gpu_configs = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[2], configurations)
-  #plot_CUDA_over_threads_per_block(gpu_name, multi_gpu_configs)
 
