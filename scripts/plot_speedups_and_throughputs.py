@@ -71,10 +71,12 @@ def parse_files(csvs):
 
 def extract(key, configuration, cond=lambda x: True):
   __access = {
-    'Ks'       : lambda e: e['K'],
-    'sizes'    : lambda e: e['size_in_GiB'],
-    'baseline' : lambda e: e['cpu'][BASE_LINE_METHOD],
-    'gpu_times': lambda e: [ _time for _, _time in e['gpu'] ]
+    'Ks'         : lambda e: e['K'],
+    'sizes'      : lambda e: e['size_in_GiB'],
+    'baseline'   : lambda e: e['cpu'][BASE_LINE_METHOD],
+    'sequential' : lambda e: e['cpu']['sequential'],
+    'OpenMP'     : lambda e: e['cpu']['OpenMP'],
+    'gpu_times'  : lambda e: [ _time for _, _time in e['gpu'] ]
   }
   return np.array([ __access[key](e) for e in configuration['executions'] if cond(e) ])
   
@@ -285,8 +287,104 @@ def plot_multiGPU_speedups(gpu_name, configuration_pairs):
 
 # -------------------------------------------------------------------------------------------------
 
-def plot_comparison(configurations):
-  pass
+def plot_comparison(gpu_name, configurations):
+  def __plot_comparison(configuration, num_ocl_devices, selection_criterion, computation_criterion):
+    threads_per_block = np.unique([ tpb for tpb, _ in configuration['executions'][0]['gpu'] ])
+    dataset_sizes     = np.unique(extract('sizes', configuration))
+    Ks                = np.unique(extract('Ks',    configuration))
+
+    averaging_over = {
+      'K'    : 'sizes',
+      'sizes': 'Ks'
+    }[selection_criterion]
+
+    data_group = {
+      'K'    : Ks,
+      'sizes': dataset_sizes
+    }[selection_criterion]
+    
+    line_label = {
+      'K'    : lambda k: f"K = {k}",
+      'sizes': lambda s: f"Size = {np.around(s, decimals=1)} GiB"
+    }[selection_criterion]
+    
+    selection_function_t = {
+      'K'    : lambda e, val: e['K'] == val,
+      'sizes': lambda e, val: abs(e['size_in_GiB'] - val) < 1e-5
+    }[selection_criterion]
+    
+    computation_function = {
+      'speedup'   : lambda baseline, exec_times,      _: np.true_divide(baseline, exec_times),
+      'throughput': lambda        _, exec_times, memory: np.true_divide(  memory, exec_times / 1000.0)
+    }[computation_criterion]
+    
+    computation_unit = {
+      'speedup'   : 'x',
+      'throughput': 'GiB/s'
+    }[computation_criterion]
+    
+    title_infix = {
+      'speedup'   : 'relative to sequential CPU execution; ',
+      'throughput': ''
+    }[computation_criterion]
+    
+    def __to_coord(data_idcs, group_idx, bar_width = 0.2): # data_idx == 1 for seq, 2 for omp, ...;  group_idx == idx of subgroup
+      off = (group_idx - (threads_per_block.size - 1) // 2) * bar_width
+      return [ 2*data_idx + off for data_idx in data_idcs ]
+
+    plt.figure(figsize=(15,10))
+    plt.clf()
+    
+    for data_idx, value in enumerate(data_group):
+      
+      selection_function = lambda e: selection_function_t(e, value)
+      sizes   = extract('sizes',      configuration, selection_function)
+      cpu_seq = extract('sequential', configuration, selection_function) # (group x 1)
+      cpu_omp = extract('OpenMP',     configuration, selection_function) # (group x 1)
+      gpu     = extract('gpu_times',  configuration, selection_function) # (group x (nr_cuda + nr_ocl) x threads_per_block_without_cuda_optimal)
+      
+      # TODO: handle multi-gpu case, e.g. average over cuda execs for multi-gpu, how many ocl devices?
+      
+      nr_ocl  = num_ocl_devices
+      nr_cuda = gpu.shape[1] // (threads_per_block.size-1) - nr_ocl
+      # cuda : (group x (nr_cuda * threads_per_block_without_cuda_optimal))
+      cuda    = np.concatenate([ gpu[:, i*threads_per_block.size : i*threads_per_block.size+(threads_per_block.size-1)] for i in range(nr_cuda) ])
+      # ocl : (group x (nr_ocl * threads_per_block_without_cuda_optimal))
+      ocl     = gpu[:, nr_cuda*threads_per_block.size:]
+      
+      # Compute all the data (speedup/throughput) compared to the sequential CPU execution 
+      seq_improvement  = computation_function(cpu_seq,               cpu_seq, sizes)                 # (group x 1)
+      omp_improvement  = computation_function(cpu_seq,               cpu_omp, sizes)                 # (group x 1)
+      ocl_improvement  = computation_function(cpu_seq[:,np.newaxis], ocl,     sizes[:,np.newaxis])   # (group x (nr_ocl  x threads_per_block_without_cuda_optimal)
+      cuda_improvement = computation_function(cpu_seq[:,np.newaxis], cuda,    sizes[:,np.newaxis])   # (group x (nr_cuda x threads_per_block_without_cuda_optimal)
+      
+      improvements     = [ seq_improvement[:,np.newaxis], omp_improvement[:,np.newaxis], ocl_improvement, cuda_improvement ]
+
+      
+      # For current group, e.g., the current value of K, average over the other property (e.g., size) AND the threads per block (!)
+      x = __to_coord(range(len(improvements)), data_idx) # x-coord for each "value" of "data_group", e.g., each K in Ks
+      y    = [ np.mean(impr) for impr in improvements ]
+      yerr = [  np.std(impr) for impr in improvements ]
+      plt.errorbar(x, y, yerr=yerr, capsize=6, fmt="o", label=line_label(value))
+
+    if computation_criterion == 'speedup':
+      _xmin, _xmax = plt.xlim()
+      plt.plot([_xmin, _xmax], [1, 1], '--k')
+    
+    plt.title(f"Comparison of {computation_criterion}s over different devices \n({title_infix}averaged over {averaging_over})")
+    plt.xticks(__to_coord(range(4), len(data_group)//2), ['Sequential', 'OpenMP', 'OpenCL', 'CUDA'])
+    plt.legend()
+    plt.xlabel("execution")
+    plt.ylabel(f"{computation_criterion} [{computation_unit}]")
+    plt.savefig(f"{configuration['device_name']}_{computation_criterion}_{selection_criterion}_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+
+  for configuration in configurations:
+    num_ocl_devices = int(input("Number of OpenCL devices: "))
+    __plot_comparison(configuration, num_ocl_devices, 'K',     'speedup')
+    __plot_comparison(configuration, num_ocl_devices, 'sizes', 'speedup')
+    __plot_comparison(configuration, num_ocl_devices, 'K',     'throughput')
+    __plot_comparison(configuration, num_ocl_devices, 'sizes', 'throughput')
+
 
 # -------------------------------------------------------------------------------------------------
 
@@ -324,5 +422,11 @@ if __name__ == '__main__':
   multi_GPU_speedup_config_pairs = pair_up_multiGPU_configurations(configurations)
   plot_multiGPU_speedups(gpu_name, multi_GPU_speedup_config_pairs)
   print("done.")
+  
+  # 4. plot the OpenCL vs. CUDA vs. CPU comparison
+  print("Plotting the comparison of CPU vs. OpenCL vs. CUDA ... ")
+  comparison_configs = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[0], configurations)
+  plot_comparison(gpu_name, comparison_configs)
+  print("Plotting the comparison of CPU vs. OpenCL vs. CUDA ... done.")
   
 
