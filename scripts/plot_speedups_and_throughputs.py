@@ -7,10 +7,6 @@ import matplotlib.pyplot as plt
 
 BENCHMARK_TYPES = ['CUDA vs OpenCL', 'CUDA Allocation Size', 'CUDA Multi-GPU']
 
-def set_baseline(baseline):
-  global BASE_LINE_METHOD
-  BASE_LINE_METHOD = baseline
-
 def parse_files(csvs):
   def __get_benchmark_type(csv_filename):
     base_name = os.path.basename(csv_filename)
@@ -73,7 +69,6 @@ def extract(key, configuration, cond=lambda x: True):
   __access = {
     'Ks'         : lambda e: e['K'],
     'sizes'      : lambda e: e['size_in_GiB'],
-    'baseline'   : lambda e: e['cpu'][BASE_LINE_METHOD],
     'sequential' : lambda e: e['cpu']['sequential'],
     'OpenMP'     : lambda e: e['cpu']['OpenMP'],
     'gpu_times'  : lambda e: [ _time for _, _time in e['gpu'] ]
@@ -81,8 +76,8 @@ def extract(key, configuration, cond=lambda x: True):
   return np.array([ __access[key](e) for e in configuration['executions'] if cond(e) ])
   
 
-def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, computation_criterion):
-  threads_per_block = [ tpb for tpb, _ in configuration['executions'][0]['gpu'] ]
+def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, computation_criterion, baseline):
+  threads_per_block = np.unique([ tpb for tpb, _ in configuration['executions'][0]['gpu'] ])
   dataset_sizes     = np.unique(extract('sizes', configuration))
   Ks                = np.unique(extract('Ks',    configuration))
 
@@ -122,7 +117,7 @@ def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, co
   }[computation_criterion]
   
   title_infix = {
-    'speedup'   : f"over {BASE_LINE_METHOD} CPU execution",
+    'speedup'   : f"over {baseline} CPU execution",
     'throughput': ""
   }[computation_criterion]
   
@@ -131,13 +126,18 @@ def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, co
   min_value, max_value = float('inf'), 0
   for value in data_group:
     selection_function = lambda e: selection_function_t(e, value)
-    baseline_time = extract('baseline',  configuration, selection_function)
+    baseline_time = extract(baseline,    configuration, selection_function)
     exec_times    = extract('gpu_times', configuration, selection_function)
     sizes         = extract('sizes',     configuration, selection_function)
     
     computed_values     = computation_function(baseline_time, exec_times, sizes)
-    computed_values_avg = np.mean(computed_values, axis=0)
-    computed_values_std = np.std( computed_values, axis=0)
+    
+    # If we have a multi-GPU setup, more values are measured. Average them to get a good estimate.
+    values_reshaped = computed_values.reshape((baseline_time.size, -1, threads_per_block.size))
+    values_per_device = np.mean(values_reshaped, axis=1)
+    
+    computed_values_avg = np.mean(values_per_device, axis=0)
+    computed_values_std = np.std( values_per_device, axis=0)
     
     min_value = min(min_value, np.min(computed_values_avg - computed_values_std) if fill_std else np.min(computed_values_avg) )
     max_value = max(max_value, np.max(computed_values_avg + computed_values_std) if fill_std else np.max(computed_values_avg) )
@@ -153,19 +153,19 @@ def plot_over_threads_per_block(gpu_name, configuration, selection_criterion, co
   plt.xlabel("threads/block")
   plt.ylabel(f"{computation_criterion} [{computation_unit}]")
   plt.legend()
-  plt.savefig(f"{configuration['device_name']}_{computation_criterion}_{selection_criterion}_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
-
+  plt.savefig(f"{configuration['device_name']}_{computation_criterion}_over_{baseline}_{selection_criterion}_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+  plt.close()
 
 def plot_CUDA_over_threads_per_block(gpu_name, configurations):
   for configuration in configurations:
-    plot_over_threads_per_block(gpu_name, configuration, 'K',     'speedup')
-    plot_over_threads_per_block(gpu_name, configuration, 'sizes', 'speedup')
-    plot_over_threads_per_block(gpu_name, configuration, 'K',     'throughput')
-    plot_over_threads_per_block(gpu_name, configuration, 'sizes', 'throughput')
+    for baseline in ['sequential', 'OpenMP']:
+      for computation_criterion in ['speedup', 'throughput']:
+        plot_over_threads_per_block(gpu_name, configuration, 'K',     computation_criterion, baseline)
+        plot_over_threads_per_block(gpu_name, configuration, 'sizes', computation_criterion, baseline)
 
 
 def plot_CUDA_one_size_over_threads_per_block(gpu_name, configurations):
-  def __plot_multiple_K_lines(configuration, computation_criterion):
+  def __plot_multiple_K_lines(configuration, computation_criterion, baseline):
     computation_function = {
       'speedup'   : lambda baseline, exec_times,      _: np.true_divide(baseline[:,np.newaxis], exec_times),
       'throughput': lambda        _, exec_times, memory: np.true_divide(  memory[:,np.newaxis], exec_times / 1000.0)
@@ -177,28 +177,33 @@ def plot_CUDA_one_size_over_threads_per_block(gpu_name, configurations):
     }[computation_criterion]
 
     title_infix = {
-      'speedup'   : f"over {BASE_LINE_METHOD} CPU execution",
+      'speedup'   : f"over {baseline} CPU execution",
       'throughput': ""
     }[computation_criterion]
     
-    threads_per_block = [ tpb for tpb, _ in configuration['executions'][0]['gpu'] ]
+    threads_per_block = np.unique([ tpb for tpb, _ in configuration['executions'][0]['gpu'] ])
     Ks                = np.unique(extract('Ks',    configuration))
-    target_size       = np.min(extract('sizes', configuration)) # only do the plot for the largest size
+    target_size       = np.min(extract('sizes', configuration)) # only do the plot for the smallest size
 
     plt.figure(figsize=(15,10))
     
     min_value, max_value = float('inf'), 0
     for K in Ks:
       selection_function = lambda e: abs(e['size_in_GiB'] - target_size) < 1e-5 and e['K'] == K
-      baseline_time = extract('baseline',  configuration, selection_function)
+      baseline_time = extract(baseline,    configuration, selection_function)
       exec_times    = extract('gpu_times', configuration, selection_function)
       sizes         = extract('sizes',     configuration, selection_function)
       
       computed_values = computation_function(baseline_time, exec_times, sizes)[0,...]
-      min_value = min(min_value, np.min(computed_values))
-      max_value = max(max_value, np.max(computed_values))
+
+      # account for multi-GPU setups
+      values_reshaped = computed_values.reshape((baseline_time.size, -1, threads_per_block.size))
+      values_per_device = np.mean(values_reshaped, axis=1) # (1 x threads/block)
+
+      min_value = min(min_value, np.min(values_per_device))
+      max_value = max(max_value, np.max(values_per_device))
       
-      plt.plot(threads_per_block, computed_values, label=f"K = {K}")
+      plt.plot(threads_per_block, values_per_device[0,...], label=f"K = {K}")
     
     plt.title(f"CUDA {computation_criterion}s {title_infix}\n(device: {gpu_name}; processing {np.around(target_size, decimals=1)} GiB)")
     plt.xticks(threads_per_block)
@@ -206,11 +211,13 @@ def plot_CUDA_one_size_over_threads_per_block(gpu_name, configurations):
     plt.xlabel("threads/block")
     plt.ylabel(f"{computation_criterion} [{computation_unit}]")
     plt.legend()
-    plt.savefig(f"{configuration['device_name']}_{computation_criterion}_singleSize_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+    plt.savefig(f"{configuration['device_name']}_{computation_criterion}_over_{baseline}_singleSize_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+    plt.close()
 
   for configuration in configurations:
-    __plot_multiple_K_lines(configuration, 'speedup')
-    __plot_multiple_K_lines(configuration, 'throughput')
+    for baseline in ['sequential', 'OpenMP']:
+      for computation_criterion in ['speedup', 'throughput']:
+        __plot_multiple_K_lines(configuration, computation_criterion, baseline)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -223,12 +230,14 @@ def pair_up_multiGPU_configurations(configurations):
       yield (config, single_gpu_config[0])
 
 
-def plot_multiGPU_speedups(gpu_name, configuration_pairs):
+def plot_multiGPU_throughputs(gpu_name, configuration_pairs):
   def __plot_multiGPU(multi_GPU_config, single_gpu_config, selection_criterion):
-    threads_per_block = [ tpb for tpb, _ in multi_GPU_config['executions'][0]['gpu'] ]
+    threads_per_block = np.array([ tpb for tpb, _ in multi_GPU_config['executions'][0]['gpu'] ])
     dataset_sizes     = np.unique(extract('sizes', multi_GPU_config))
     Ks                = np.unique(extract('Ks',    multi_GPU_config))
-
+    
+    baseline_multiplier = np.true_divide( np.unique(extract('sizes', multi_GPU_config)), np.unique(extract('sizes', single_gpu_config)) )
+    
     averaging_over = {
       'K'    : 'sizes',
       'sizes': 'Ks'
@@ -240,45 +249,49 @@ def plot_multiGPU_speedups(gpu_name, configuration_pairs):
     }[selection_criterion]
     
     line_label = {
-      'K'    : lambda k: f"K = {k}",
+      'K'    : lambda k: f"K = {k:>2}",
       'sizes': lambda s: f"Size = {np.around(s, decimals=1)} GiB"
     }[selection_criterion]
     
-    selection_function_t = {
-      'K'    : lambda e, val: e['K'] == val,
-      'sizes': lambda e, val: abs(e['size_in_GiB'] - val) < 1e-5
-    }[selection_criterion]
-    
-    fill_std = {
-      'K'    : False,#True,
-      'sizes': False
-    }[selection_criterion]
-
     plt.figure(figsize=(15,10))
-    min_value, max_value = float('inf'), 0
-    for value in data_group:
-      selection_function = lambda e: selection_function_t(e, value)
-      baseline_time = extract('gpu_times', single_gpu_config, selection_function) # (group x threads/block), baseline now is the gpu speeds of the single GPU version ...
-      exec_times    = extract('gpu_times',  multi_GPU_config, selection_function) # (group x threads/block), ... for a comparison with the multi GPU setup
+    for group_idx, value in enumerate(data_group):
+      if selection_criterion == 'sizes':
+        selection_function_multi  = lambda e: abs(e['size_in_GiB'] - value) < 1e-5
+        selection_function_single = lambda e: abs(e['size_in_GiB'] - value / baseline_multiplier[group_idx]) < 1e-5
+      elif selection_criterion == 'K':
+        selection_function_multi  = lambda e: e['K'] == value
+        selection_function_single = selection_function_multi
       
-      computed_values     = np.true_divide(baseline_time, exec_times)
-      computed_values_avg = np.mean(computed_values, axis=0)
-      computed_values_std = np.std( computed_values, axis=0)
-      
-      min_value = min(min_value, np.min(computed_values_avg - computed_values_std) if fill_std else np.min(computed_values_avg) )
-      max_value = max(max_value, np.max(computed_values_avg + computed_values_std) if fill_std else np.max(computed_values_avg) )
+      baseline_time = extract('gpu_times', single_gpu_config, selection_function_single) / 1000.0 # [s]; (group x (nr_gpus x threads/block)), baseline now is the gpu speeds of the single GPU version ...
+      exec_times    = extract('gpu_times',  multi_GPU_config, selection_function_multi)  / 1000.0 # [s]; (group x threads/block),             ... for a comparison with the multi GPU setup
 
-      plt.plot(threads_per_block, computed_values_avg, label=line_label(value))
-      if fill_std:
-        plt.fill_between(threads_per_block, np.maximum(computed_values_avg-computed_values_std, 0), computed_values_avg+computed_values_std, alpha=0.25)
+      # as the baseline_time array contains the individual times of ALL GPUs, average them first (per configuration/group)
+      baseline_reshaped = baseline_time.reshape((exec_times.shape[0], -1, exec_times.shape[1]))
+      avg_baseline = np.mean( baseline_reshaped, axis=1 )
+      nr_gpus = baseline_reshaped.shape[1]
+      
+      # compute the throughputs in GiB/s for both single and multi GPU execution
+      sizes_single_gpu = extract('sizes', single_gpu_config, selection_function_single)[:,np.newaxis]
+      sizes_multi__gpu = extract('sizes', multi_GPU_config,  selection_function_multi )[:,np.newaxis]
+      
+      throughput_single_gpu = sizes_single_gpu / avg_baseline
+      throughput_multi__gpu = sizes_multi__gpu / exec_times
+      
+      _tsga = np.mean(throughput_single_gpu, axis=0)
+      _tsgs = np.std( throughput_single_gpu, axis=0)
+      _tmga = np.mean(throughput_multi__gpu, axis=0)
+      _tmgs = np.std( throughput_multi__gpu, axis=0)
+      group_max = np.maximum(_tsga+_tsgs, _tmga+_tmgs)
+      group_min = np.minimum(_tsga-_tsgs, _tmga-_tmgs)
+      plt.fill_between(threads_per_block, group_min, group_max, alpha=0.5, label=f"{line_label(value)}")
     
-    plt.title(f"Multi-GPU speedups (CUDA) over single GPU execution\n(device: {gpu_name}; averaged over {averaging_over})")
+    plt.title(f"CUDA Multi-GPU vs. single GPU throughputs\n(device: {gpu_name}; averaged over {averaging_over})")
     plt.xticks(threads_per_block)
-    plt.ylim([max(min_value * 0.95, 0), max_value * 1.05])
     plt.xlabel("threads/block")
-    plt.ylabel(f"speedup [x]")
+    plt.ylabel(f"throughput [GiB/s]")
     plt.legend()
-    plt.savefig(f"{multi_GPU_config['device_name']}_speedup_{selection_criterion}_{'_'.join(multi_GPU_config['benchmark_type'].split())}.pdf", dpi=300)
+    plt.savefig(f"{multi_GPU_config['device_name']}_throughput_{selection_criterion}_{'_'.join(multi_GPU_config['benchmark_type'].split())}.pdf", dpi=300)
+    plt.close()
 
   for multi_gpu_config, single_gpu_config in configuration_pairs:
     __plot_multiGPU(multi_gpu_config, single_gpu_config, 'K')
@@ -333,7 +346,6 @@ def plot_comparison(gpu_name, configurations):
       return [ 2*data_idx + off for data_idx in data_idcs ]
 
     plt.figure(figsize=(15,10))
-    plt.clf()
     
     for data_idx, value in enumerate(data_group):
       
@@ -343,12 +355,10 @@ def plot_comparison(gpu_name, configurations):
       cpu_omp = extract('OpenMP',     configuration, selection_function) # (group x 1)
       gpu     = extract('gpu_times',  configuration, selection_function) # (group x (nr_cuda + nr_ocl) x threads_per_block_without_cuda_optimal)
       
-      # TODO: handle multi-gpu case, e.g. average over cuda execs for multi-gpu, how many ocl devices?
-      
       nr_ocl  = num_ocl_devices
       nr_cuda = gpu.shape[1] // (threads_per_block.size-1) - nr_ocl
       # cuda : (group x (nr_cuda * threads_per_block_without_cuda_optimal))
-      cuda    = np.concatenate([ gpu[:, i*threads_per_block.size : i*threads_per_block.size+(threads_per_block.size-1)] for i in range(nr_cuda) ])
+      cuda    = np.concatenate([ gpu[:, i*threads_per_block.size : i*threads_per_block.size+(threads_per_block.size-1)] for i in range(nr_cuda) ]).reshape((cpu_seq.shape[0], -1))
       # ocl : (group x (nr_ocl * threads_per_block_without_cuda_optimal))
       ocl     = gpu[:, nr_cuda*threads_per_block.size:]
       
@@ -377,6 +387,7 @@ def plot_comparison(gpu_name, configurations):
     plt.xlabel("execution")
     plt.ylabel(f"{computation_criterion} [{computation_unit}]")
     plt.savefig(f"{configuration['device_name']}_{computation_criterion}_{selection_criterion}_{'_'.join(configuration['benchmark_type'].split())}.pdf", dpi=300)
+    plt.close()
 
   for configuration in configurations:
     num_ocl_devices = int(input("Number of OpenCL devices: "))
@@ -390,13 +401,12 @@ def plot_comparison(gpu_name, configurations):
 
 if __name__ == '__main__':
   import sys
-  if len(sys.argv) < 2:
-    print(f"Usage: {sys.argv[0]} <gpu-name> <baseline> <path-to-csv> [<path-to-csv>...]")
+  if len(sys.argv) < 3:
+    print(f"Usage: {sys.argv[0]} <gpu-name> <path-to-csv> [<path-to-csv>...]")
     exit(1)
 
   gpu_name = sys.argv[1]
-  set_baseline(sys.argv[2])
-  configurations = parse_files(sys.argv[3:])
+  configurations = parse_files(sys.argv[2:])
   
   # 1. plot the speedups and the throughputs for the CUDA case only
   print("Plotting the CUDA speedups and throughputs                                    ... ", end="")
@@ -404,8 +414,8 @@ if __name__ == '__main__':
   plot_CUDA_over_threads_per_block(gpu_name, relevant_configurations)
   print("done.")
   
-  # 2. plot the speedups and throughputs without averaging, i.e., plot multiple lines (one for each K), for the largest sizes only (CUDA only)
-  print("Plotting the speedups and throughputs for the largest size only               ... ", end="")
+  # 2. plot the speedups and throughputs without averaging, i.e., plot multiple lines (one for each K), for the smallest size only (CUDA only)
+  print("Plotting the speedups and throughputs for the smallest size only               ... ", end="")
   relevant_configurations = filter(lambda conf: conf['benchmark_type'] == BENCHMARK_TYPES[1], configurations)
   plot_CUDA_one_size_over_threads_per_block(gpu_name, relevant_configurations)
   print("done.")
@@ -420,7 +430,7 @@ if __name__ == '__main__':
   #    3.2 plot the speeups of multi GPU execution over the single gpu (bigger allocation) case
   print("Plotting the speedups of the multi-GPU execution vs. the single GPU benchmark ... ", end="")
   multi_GPU_speedup_config_pairs = pair_up_multiGPU_configurations(configurations)
-  plot_multiGPU_speedups(gpu_name, multi_GPU_speedup_config_pairs)
+  plot_multiGPU_throughputs(gpu_name, multi_GPU_speedup_config_pairs)
   print("done.")
   
   # 4. plot the OpenCL vs. CUDA vs. CPU comparison
