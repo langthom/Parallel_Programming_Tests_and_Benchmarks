@@ -82,6 +82,15 @@ cudaError_t launchKernel(float* out,
                          int deviceID,
                          int threadsPerBlock);
 
+
+/// Launches the kernel for mapped memory, i.e., omits any copying.
+/// Otherwise, see #launchKernel().
+cudaError_t launchKernelMapped(float* out, float* in, int64_t N, 
+                               int64_t* offsets, int K, 
+                               int64_t dimX, int64_t dimY, int64_t dimZ, 
+                               float* elapsedTime, int deviceID, int threadsPerBlock);
+
+
 /// <summary>
 /// Retrieves information about all available CUDA devices. All parameters are output parameters.
 /// </summary>

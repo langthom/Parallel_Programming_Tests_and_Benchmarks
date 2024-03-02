@@ -175,6 +175,46 @@ cudaError_t launchKernel(float* out, float* in, int64_t N, int64_t* offsets, int
 #undef HANDLE_ERROR_STMT
 }
 
+cudaError_t launchKernelMapped(float* out, float* in, int64_t N, int64_t* offsets, int K, int64_t dimX, int64_t dimY, int64_t dimZ, float* elapsedTime, int deviceID, int threadsPerBlock)
+{
+#define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
+#define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
+
+  assert(out);
+  assert(in);
+  assert(offsets);
+  assert(elapsedTime);
+
+  cudaError_t error = cudaError_t::cudaSuccess;
+  error = cudaSetDevice(deviceID);
+  HANDLE_ERROR(error);
+
+  int pad = K - 1;
+  int64_t sizeInBytes  = N * sizeof(float);
+  int64_t sizeOutBytes = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
+  int64_t offsetBytes  = K * K * K * sizeof(int64_t);
+
+  // Create events for timing the code. This shall include also the memory transfer to be 
+  // comparable with the multi GPU and CPU approaches.
+  cudaEvent_t start, stop;
+  error = cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
+  error = cudaEventCreateWithFlags(&stop,  cudaEventBlockingSync);
+  error = cudaEventRecord(start);
+  HANDLE_ERROR(error);
+
+  int64_t blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+  statisticsKernel<<< blocksPerGrid, threadsPerBlock >>>(in, out, offsets, K, N, dimX, dimY, dimZ);
+
+  error = cudaEventRecord(stop);
+  error = cudaEventSynchronize(stop);
+  error = cudaEventElapsedTime(elapsedTime, start, stop);
+  HANDLE_ERROR(error);
+  return cudaError_t::cudaSuccess;
+
+#undef HANDLE_ERROR
+#undef HANDLE_ERROR_STMT
+}
+
 
 cudaError_t getGPUInformation(int& nr_gpus, std::vector< std::string >& deviceNames, std::vector< size_t >& availableMemoryPerDevice, std::vector< size_t >& totalMemoryPerDevice) {
   cudaError_t error = cudaError_t::cudaSuccess;
