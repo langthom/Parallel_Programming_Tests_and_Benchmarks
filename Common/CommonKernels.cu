@@ -189,11 +189,6 @@ cudaError_t launchKernelMapped(float* out, float* in, int64_t N, int64_t* offset
   error = cudaSetDevice(deviceID);
   HANDLE_ERROR(error);
 
-  int pad = K - 1;
-  int64_t sizeInBytes  = N * sizeof(float);
-  int64_t sizeOutBytes = (dimX - pad) * (dimY - pad) * (dimZ - pad) * sizeof(float);
-  int64_t offsetBytes  = K * K * K * sizeof(int64_t);
-
   // Create events for timing the code. This shall include also the memory transfer to be 
   // comparable with the multi GPU and CPU approaches.
   cudaEvent_t start, stop;
