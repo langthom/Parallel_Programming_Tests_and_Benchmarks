@@ -119,7 +119,7 @@ void benchmark(std::ostream& out, double memInGiB, std::unique_ptr< float[] > co
   };
 
   for(int dim = 0; dim < blocks.size(); ++dim) {
-    bool success = callCudaKernel(blocks.at(dim), dim);
+    bool success = callCudaKernel(blocks.at(dim), dim+1);
     out.flush();
     if(!success) {
       return;
