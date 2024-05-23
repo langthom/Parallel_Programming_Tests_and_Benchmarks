@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
   double maxMemoryGiB           = 0.5;
   int numPercentages            = 1;
   int _Kmin                     = 3;
-  int _Kmax                     = 5;
+  int _Kmax                     = 3;
 
   int Kmin                      = std::min(_Kmin, _Kmax);
   int Kmax                      = std::max(_Kmin, _Kmax);
