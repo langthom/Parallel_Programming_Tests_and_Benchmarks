@@ -49,7 +49,7 @@
 cudaError_t launchKernelNDWithShared(
   float* out, float* in,
   int_least64_t* offsets, int K, 
-  int_least64_t dimX, int_least64_t dimY, int_least64_t dimZ, 
+  unsigned int dimX, unsigned int dimY, unsigned int dimZ, 
   dim3 threads,
   std::vector< float >& elapsedMillis,
   int deviceID);
@@ -58,7 +58,7 @@ cudaError_t launchKernelNDWithShared(
 cudaError_t launchKernelNDWithoutShared(
   float* out, float* in,
   int_least64_t* offsets, int K, 
-  int_least64_t dimX, int_least64_t dimY, int_least64_t dimZ, 
+  unsigned int dimX, unsigned int dimY, unsigned int dimZ, 
   dim3 threads,
   std::vector< float >& elapsedMillis,
   int deviceID);

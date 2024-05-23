@@ -136,7 +136,6 @@ void benchmark(std::ostream& out, double memInGiB, std::unique_ptr< float[] > co
 
 int main(int argc, char** argv) {
 
-  /*
   if (argc < 6) {
     std::cerr << "Usage: " << argv[0] << " <path/to/output/benchmark/csv>  <max-mem-in-GiB>  <num-percentages>  <Kmin>  <Kmax> \n\n";
     std::cerr << "  <path/to/output/benchmark/csv>  File path to the benchmark file that will be generated.\n";
@@ -164,15 +163,9 @@ int main(int argc, char** argv) {
   int numPercentages            = parseInt(argv[3]);
   int _Kmin                     = parseInt(argv[4]);
   int _Kmax                     = parseInt(argv[5]);
-  */
 
-  double maxMemoryGiB           = 0.5;
-  int numPercentages            = 1;
-  int _Kmin                     = 3;
-  int _Kmax                     = 3;
-
-  int Kmin                      = std::min(_Kmin, _Kmax);
-  int Kmax                      = std::max(_Kmin, _Kmax);
+  int Kmin = std::min(_Kmin, _Kmax);
+  int Kmax = std::max(_Kmin, _Kmax);
 
   int deviceID = 0;
   {
@@ -196,8 +189,7 @@ int main(int argc, char** argv) {
   double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB, 0.9, false);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n\n";
 
-  //std::ofstream log(benchmarkLogFile);
-  std::ostream& log = std::cout;
+  std::ofstream log(benchmarkLogFile);
   log << "Mem [GiB],K,CPU [ms],GPU global memory 1D [ms],GPU global memory 3D [ms],GPU shared memory [ms]\n";
 
   int percentageStep = 100 / numPercentages;

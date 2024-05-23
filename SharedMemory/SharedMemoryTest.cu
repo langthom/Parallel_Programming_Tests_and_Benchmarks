@@ -91,8 +91,7 @@ void statisticsKernelND(float* in, float* out, int_least64_t* offsets, int K, in
           int_least64_t globalIndexWithPadding    = (z * dimY + y) * dimX + x;
           int_least64_t globalIndexWithoutPadding = ((z - K2) * dimY_withoutPadding + (y - K2)) * dimX_withoutPadding + (x - K2);
           statsND(features, in, globalIndexWithPadding, offsets, K*K*K);
-          //out[globalIndexWithoutPadding] = features[0];
-          out[globalIndexWithoutPadding] = in[globalIndexWithPadding];
+          out[globalIndexWithoutPadding] = features[0];
         }
       }
     }
@@ -105,21 +104,6 @@ void statisticsKernelND(float* in, float* out, int_least64_t* offsets, int K, in
 using CacheIndex1D  = unsigned int;
 using CacheIndex3D  = uint3;
 using VolumeIndex1D = long long;
-using VolumeIndex3D = longlong3;
-
-
-/*
-template< class IndexVectorType, class IndexType = decltype(IndexVectorType{}.x) > 
-__device__ 
-IndexType to1D(IndexVectorType coord3D, IndexVectorType const dimsOffsets) {
-  coord3D.x *= dimsOffsets.x;
-  coord3D.y *= dimsOffsets.y;
-  coord3D.z *= dimsOffsets.z;
-  return coord3D.x + coord3D.y + coord3D.z;
-}
-
-#define TO1D(ix, iy, iz, dimX, dimY) ((iz) * (dimY) + (iy)) * (dimX) + (ix)
-*/
 
 template< class OutputIndexType, class IndexType >
 __device__
@@ -140,22 +124,17 @@ void loadSharedData(float* cache, float* data, CacheIndex1D dimX, CacheIndex1D d
     for(CacheIndex1D blockTileY = 0; blockTileY < numBlockTilesY; ++blockTileY) {
       for(CacheIndex1D blockTileX = 0; blockTileX < numBlockTilesX; ++blockTileX) {
 
-        CacheIndex1D fullBlockZ = blockTileZ * blockDim.z + threadIdx.z;
-        CacheIndex1D fullBlockY = blockTileY * blockDim.y + threadIdx.y;
-        CacheIndex1D fullBlockX = blockTileX * blockDim.x + threadIdx.x;
-
-        CacheIndex1D const cacheIdx = to1D< CacheIndex1D >(fullBlockX, fullBlockY, fullBlockZ, blockDim.x+K-1, blockDim.y+K-1);
-
-        int const activeInBlock = (fullBlockZ < blockDim.z + K - 1 && fullBlockY < blockDim.y + K - 1 && fullBlockX < blockDim.x + K - 1);
-
+        CacheIndex1D       fullBlockZ = blockTileZ * blockDim.z + threadIdx.z;
+        CacheIndex1D       fullBlockY = blockTileY * blockDim.y + threadIdx.y;
+        CacheIndex1D       fullBlockX = blockTileX * blockDim.x + threadIdx.x;
+        CacheIndex1D const cacheIdx   = to1D< CacheIndex1D >(fullBlockX, fullBlockY, fullBlockZ, blockDim.x+K-1, blockDim.y+K-1);
+        int const activeInBlock       = (fullBlockZ < blockDim.z + K - 1 && fullBlockY < blockDim.y + K - 1 && fullBlockX < blockDim.x + K - 1);
 
         fullBlockZ += blockIdx.z * blockDim.z;
         fullBlockY += blockIdx.y * blockDim.y;
         fullBlockX += blockIdx.x * blockDim.x;
-
         VolumeIndex1D const volumeIndex = to1D< VolumeIndex1D >(fullBlockX, fullBlockY, fullBlockZ, dimX, dimY);
-
-        int const insideGlobal  = (fullBlockZ < dimZ && fullBlockY < dimY && fullBlockX < dimX);
+        int const insideGlobal = (fullBlockZ < dimZ && fullBlockY < dimY && fullBlockX < dimX);
 
         if(activeInBlock && insideGlobal) {
           cache[cacheIdx] = data[volumeIndex];
@@ -170,19 +149,19 @@ void loadSharedData(float* cache, float* data, CacheIndex1D dimX, CacheIndex1D d
 
 __device__
 void storeResult(float const* cache, float* out, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ, int K) {
-  int K2 = K / 2;
-
   CacheIndex3D const globalIndex {
     blockIdx.x * blockDim.x + threadIdx.x,
     blockIdx.y * blockDim.y + threadIdx.y,
     blockIdx.z * blockDim.z + threadIdx.z
   };
 
-  CacheIndex1D cacheIdx   = to1D<  CacheIndex1D >(threadIdx.x+K2,threadIdx.y+K2,threadIdx.z+K2,blockDim.x+K-1,blockDim.y+K-1);
   VolumeIndex1D volumeIdx = to1D< VolumeIndex1D >(globalIndex.x, globalIndex.y, globalIndex.z, dimX, dimY);
 
+  // Compute the index of the value to write to the global memory, which resides "further back" in shared memory.
+  CacheIndex1D featureIndex = (blockDim.x+K-1)*(blockDim.y+K-1)*(blockDim.z+K-1) + to1D< CacheIndex1D >(threadIdx.x,threadIdx.y,threadIdx.z,blockDim.x,blockDim.y);
+
   if(globalIndex.z < dimZ && globalIndex.y < dimY && globalIndex.x < dimX) {
-    out[volumeIdx] = cache[cacheIdx];
+    out[volumeIdx] = cache[featureIndex];
   }
 }
 
@@ -190,14 +169,7 @@ void storeResult(float const* cache, float* out, CacheIndex1D dimX, CacheIndex1D
 __device__
 void statsNDShared(float* features, float* cache, int envSize, int K, int_least64_t* envOffsets) {
   int K2 = K / 2;
-  CacheIndex3D const cacheOffsets{ 1, blockDim.x+K-1, (blockDim.x+K-1) * (blockDim.y+K-1) };
-  CacheIndex3D const center3D{
-    (CacheIndex1D)threadIdx.x + K2,
-    (CacheIndex1D)threadIdx.y + K2,
-    (CacheIndex1D)threadIdx.z + K2,
-  };
-
-  CacheIndex1D const center1D = to1D< CacheIndex1D >(threadIdx.x+K2,threadIdx.y+K2,threadIdx.z+K2,blockDim.x+K-1,blockDim.y+K-1); //to1D(center3D, cacheOffsets);
+  CacheIndex1D const center1D = to1D< CacheIndex1D >(threadIdx.x+K2,threadIdx.y+K2,threadIdx.z+K2,blockDim.x+K-1,blockDim.y+K-1);
 
   float sum = 0.f;
   for(int voxelIndex = 0; voxelIndex < envSize; ++voxelIndex) {
@@ -230,6 +202,12 @@ void statsNDShared(float* features, float* cache, int envSize, int K, int_least6
   features[1] = stdev;
   features[2] = skewness;
   features[3] = kurtosis;
+
+  // Write the output value for each voxel (here: its mean) to a specific position in shared memory first.
+  // Do not overwrite the current cache entry since neighboring threads might still access it.
+  CacheIndex1D featureIndex = (blockDim.x+K-1)*(blockDim.y+K-1)*(blockDim.z+K-1) + to1D< CacheIndex1D >(threadIdx.x,threadIdx.y,threadIdx.z,blockDim.x,blockDim.y);
+  cache[featureIndex] = features[0];
+  __syncthreads();
 }
 
 
@@ -238,21 +216,11 @@ void statisticsKernelNDShared(float* in, float* out, int_least64_t* envOffsets, 
   extern __shared__ float environmentCache[];
   float features[4];
 
-#if 1
-  {{{
-      int_least64_t z = blockIdx.z * blockDim.z + threadIdx.z;
-      int_least64_t y = blockIdx.y * blockDim.y + threadIdx.y;
-      int_least64_t x = blockIdx.x * blockDim.x + threadIdx.x;
-#else
   for(int z = blockIdx.z * blockDim.z + threadIdx.z; z < dimZ; z += blockDim.z*gridDim.z) {
     for(int y = blockIdx.y * blockDim.y + threadIdx.y; y < dimY; y += blockDim.y*gridDim.y) {
       for(int x = blockIdx.x * blockDim.x + threadIdx.x; x < dimX; x += blockDim.x*gridDim.x) {
-#endif
-
         loadSharedData(environmentCache, in, dimX, dimY, dimZ, K);
-
-        //statsNDShared(features, environmentCache, K*K*K, K, envOffsets);
-
+        statsNDShared(features, environmentCache, K*K*K, K, envOffsets);
         storeResult(environmentCache, out, dimX - K + 1, dimY - K + 1, dimZ - K + 1, K);
       }
     }
@@ -264,7 +232,7 @@ void statisticsKernelNDShared(float* in, float* out, int_least64_t* envOffsets, 
 cudaError_t launchKernelNDWithoutShared(
   float* out, float* in,
   int_least64_t* offsets, int K, 
-  int_least64_t dimX, int_least64_t dimY, int_least64_t dimZ, 
+  unsigned int dimX, unsigned int dimY, unsigned int dimZ, 
   dim3 threads,
   std::vector< float >& elapsedMillis,
   int deviceID)
@@ -272,7 +240,7 @@ cudaError_t launchKernelNDWithoutShared(
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
 
-  if(K > 9) {
+  if(K > 11) {
     return cudaError_t::cudaErrorLaunchOutOfResources;
   }
 
@@ -314,7 +282,7 @@ cudaError_t launchKernelNDWithoutShared(
   error = cudaEventCreateWithFlags(&stop,  cudaEventBlockingSync);
   error = cudaEventRecord(start);
 
-  statisticsKernelND<<< blocks, threads >>>(device_in, device_out, device_offsets, K, N, (CacheIndex1D)dimX, (CacheIndex1D)dimY, (CacheIndex1D)dimZ);
+  statisticsKernelND<<< blocks, threads >>>(device_in, device_out, device_offsets, K, N, dimX, dimY, dimZ);
 
   error = cudaEventRecord(stop);
   error = cudaEventSynchronize(stop);
@@ -337,7 +305,7 @@ cudaError_t launchKernelNDWithoutShared(
 cudaError_t launchKernelNDWithShared(
   float* out, float* in,
   int_least64_t* offsets, int K, 
-  int_least64_t dimX, int_least64_t dimY, int_least64_t dimZ, 
+  unsigned int dimX, unsigned int dimY, unsigned int dimZ, 
   dim3 threads,
   std::vector< float >& elapsedMillis,
   int deviceID)
@@ -345,7 +313,7 @@ cudaError_t launchKernelNDWithShared(
 #define HANDLE_ERROR(err)             if(error != cudaError_t::cudaSuccess) { return error; }
 #define HANDLE_ERROR_STMT(err, stmts) if(error != cudaError_t::cudaSuccess) { stmts; return error; }
 
-  if(K > 9) {
+  if(K > 11) {
     return cudaError_t::cudaErrorLaunchOutOfResources;
   }
 
@@ -386,13 +354,18 @@ cudaError_t launchKernelNDWithShared(
   unsigned int blocksZ = (dimZ + threads.z - 1) / threads.z;
   dim3 blocks(blocksX, blocksY, blocksZ);
 
-  int_least64_t sharedMem = (threads.x + K - 1) * (threads.y + K - 1) * (threads.z + K - 1) * sizeof(float);
+  // Allocate shared memory for caching the input data (incl. padding) as well 
+  // as for storing the decision values (not all features!) which shall be written 
+  // to the output later on.
+  unsigned int decisionValueMem = threads.x * threads.y * threads.z * sizeof(float);
+  unsigned int cacheMemory = (threads.x + K - 1) * (threads.y + K - 1) * (threads.z + K - 1) * sizeof(float);
+  unsigned int totalSharedMemory = cacheMemory + decisionValueMem;
 
   error = cudaEventCreateWithFlags(&start, cudaEventBlockingSync);
   error = cudaEventCreateWithFlags(&stop,  cudaEventBlockingSync);
   error = cudaEventRecord(start);
 
-  statisticsKernelNDShared<<< blocks, threads, sharedMem >>>(device_in, device_out, device_offsets, K, dimX, dimY, dimZ);
+  statisticsKernelNDShared<<< blocks, threads, totalSharedMemory >>>(device_in, device_out, device_offsets, K, dimX, dimY, dimZ);
 
   error = cudaPeekAtLastError();
   HANDLE_ERROR(error);
