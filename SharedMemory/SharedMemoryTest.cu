@@ -113,7 +113,7 @@ inline OutputIndexType to1D(IndexType x, IndexType y, IndexType z, IndexType dim
 }
 
 __device__ 
-void loadSharedData(float* cache, float* data, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ, int K) {
+void loadSharedData(float* cache, float const* data, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ, int K) {
 #define NUM_BLOCK_TILES(dim) (dim*2+K-2)/dim
 
   CacheIndex1D numBlockTilesZ = NUM_BLOCK_TILES(blockDim.z);
@@ -147,27 +147,9 @@ void loadSharedData(float* cache, float* data, CacheIndex1D dimX, CacheIndex1D d
   __syncthreads();
 }
 
-__device__
-void storeResult(float const* cache, float* out, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ, int K) {
-  CacheIndex3D const globalIndex {
-    blockIdx.x * blockDim.x + threadIdx.x,
-    blockIdx.y * blockDim.y + threadIdx.y,
-    blockIdx.z * blockDim.z + threadIdx.z
-  };
-
-  VolumeIndex1D volumeIdx = to1D< VolumeIndex1D >(globalIndex.x, globalIndex.y, globalIndex.z, dimX, dimY);
-
-  // Compute the index of the value to write to the global memory, which resides "further back" in shared memory.
-  CacheIndex1D featureIndex = (blockDim.x+K-1)*(blockDim.y+K-1)*(blockDim.z+K-1) + to1D< CacheIndex1D >(threadIdx.x,threadIdx.y,threadIdx.z,blockDim.x,blockDim.y);
-
-  if(globalIndex.z < dimZ && globalIndex.y < dimY && globalIndex.x < dimX) {
-    out[volumeIdx] = cache[featureIndex];
-  }
-}
-
 
 __device__
-void statsNDShared(float* features, float* cache, int envSize, int K, int_least64_t* envOffsets) {
+void statsNDShared(float* features, float const* cache, int envSize, int K, int_least64_t const* envOffsets) {
   int K2 = K / 2;
   CacheIndex1D const center1D = to1D< CacheIndex1D >(threadIdx.x+K2,threadIdx.y+K2,threadIdx.z+K2,blockDim.x+K-1,blockDim.y+K-1);
 
@@ -202,28 +184,24 @@ void statsNDShared(float* features, float* cache, int envSize, int K, int_least6
   features[1] = stdev;
   features[2] = skewness;
   features[3] = kurtosis;
-
-  // Write the output value for each voxel (here: its mean) to a specific position in shared memory first.
-  // Do not overwrite the current cache entry since neighboring threads might still access it.
-  CacheIndex1D featureIndex = (blockDim.x+K-1)*(blockDim.y+K-1)*(blockDim.z+K-1) + to1D< CacheIndex1D >(threadIdx.x,threadIdx.y,threadIdx.z,blockDim.x,blockDim.y);
-  cache[featureIndex] = features[0];
-  __syncthreads();
 }
 
 
 __global__
-void statisticsKernelNDShared(float* in, float* out, int_least64_t* envOffsets, int K, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ) {
-  extern __shared__ float environmentCache[];
+void statisticsKernelNDShared(float const* in, float* out, int_least64_t const* envOffsets, int K, CacheIndex1D dimX, CacheIndex1D dimY, CacheIndex1D dimZ) {
+  extern __shared__ float cache[];
   float features[4];
 
-  for(int z = blockIdx.z * blockDim.z + threadIdx.z; z < dimZ; z += blockDim.z*gridDim.z) {
-    for(int y = blockIdx.y * blockDim.y + threadIdx.y; y < dimY; y += blockDim.y*gridDim.y) {
-      for(int x = blockIdx.x * blockDim.x + threadIdx.x; x < dimX; x += blockDim.x*gridDim.x) {
-        loadSharedData(environmentCache, in, dimX, dimY, dimZ, K);
-        statsNDShared(features, environmentCache, K*K*K, K, envOffsets);
-        storeResult(environmentCache, out, dimX - K + 1, dimY - K + 1, dimZ - K + 1, K);
-      }
-    }
+  CacheIndex1D const globalZ = blockIdx.z * blockDim.z + threadIdx.z;
+  CacheIndex1D const globalY = blockIdx.y * blockDim.y + threadIdx.y;
+  CacheIndex1D const globalX = blockIdx.x * blockDim.x + threadIdx.x;
+
+  loadSharedData(cache, in, dimX, dimY, dimZ, K);
+  statsNDShared(features, cache, K*K*K, K, envOffsets);
+
+  CacheIndex1D const padding = K - 1;
+  if(globalZ < dimZ - padding && globalY < dimY - padding && globalX < dimX - padding) {
+    out[to1D< VolumeIndex1D >(globalX, globalY, globalZ, dimX - padding, dimY - padding)] = features[0];
   }
 }
 
