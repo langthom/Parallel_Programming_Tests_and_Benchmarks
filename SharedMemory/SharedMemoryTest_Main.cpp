@@ -46,9 +46,8 @@ void readData(float* buf, size_t N) {
 
 std::tuple< int_least64_t, int_least64_t, int_least64_t > GetDims(double memInGiB) {
   constexpr double toGiB = 1ull << 30;
-  int E = 10;
-  int_least64_t dimX = 1ull << E;
-  int_least64_t dimY = 1ull << E;
+  int_least64_t dimX = 1536; // slightly bigger than a block so we need at least 2 blocks there
+  int_least64_t dimY =  512; // same reason
   int_least64_t dimZ = static_cast< int_least64_t >(memInGiB * toGiB / (2.0/* in and output */ * sizeof(float) * dimY * dimX));
   return std::make_tuple(dimX, dimY, dimZ);
 }
