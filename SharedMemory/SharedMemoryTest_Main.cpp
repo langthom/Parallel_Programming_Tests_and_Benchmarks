@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
     return value;
   };
 
-  auto parseDouble = [](char const* arg) -> int {
+  auto parseDouble = [](char const* arg) -> double {
     double value;
     std::istringstream(arg) >> value;
     return value;
@@ -189,7 +189,13 @@ int main(int argc, char** argv) {
   double maxMemoryInGB = getMaxMemoryInGiB(maxMemoryGiB, 0.9, false);
   std::cout << "[INFO]  Max. memory used for input data: " << maxMemoryInGB << " GiB.\n\n";
 
-  std::ofstream log(benchmarkLogFile);
+  // Only write a file if requested.
+  std::ofstream logfile;
+  if(benchmarkLogFile != "cout") {
+    logfile.open(benchmarkLogFile);
+  }
+  std::ostream& log = benchmarkLogFile == "cout" ? std::cout : logfile;
+
   log << "Mem [GiB],K,CPU [ms],GPU global memory 1D [ms],GPU global memory 3D [ms],GPU shared memory [ms]\n";
 
   int percentageStep = 100 / numPercentages;
