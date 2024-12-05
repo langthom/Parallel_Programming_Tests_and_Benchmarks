@@ -11,9 +11,9 @@ def parse_files(csvs):
   def __get_benchmark_type(csv_filename):
     base_name = os.path.basename(csv_filename)
     types_and_patterns = [
-      (BENCHMARK_TYPES[0], re.compile('^benchmark_maskedProcessing_(\w+).csv$')),
-      (BENCHMARK_TYPES[1], re.compile('^benchmark_cudaBiggerAllocation_(\w+).csv$')),
-      (BENCHMARK_TYPES[2], re.compile('^benchmark_cudaMultiGPU_(\w+).csv$'))
+      (BENCHMARK_TYPES[0], re.compile(r'^benchmark_maskedProcessing_([a-zA-Z0-9]+).csv$')),
+      (BENCHMARK_TYPES[1], re.compile(r'^benchmark_cudaBiggerAllocation_([a-zA-Z0-9]+).csv$')),
+      (BENCHMARK_TYPES[2], re.compile(r'^benchmark_cudaMultiGPU_([a-zA-Z0-9]+).csv$'))
     ]
     for _type, _pattern in types_and_patterns:
       _match = _pattern.match(base_name)
