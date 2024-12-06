@@ -69,14 +69,15 @@ void benchmark(std::ostream& out, double memInGiB, int K, int inMaxThreadsPerBlo
   std::cout << "Using block of dimensions " << dimX << " x " << dimY << " x " << dimZ << " (" << (2 * _N) << " " << unit << " overall); "
             << "Using regions of size " << K << " x " << K << " x " << K << ".\n";
 
+  std::vector< float > data(N, 0);
+  readData(data.data(), N);
+
   int pad = K - 1;
   int64_t sizeWithoutPadding = (dimX - pad) * (dimY - pad) * (dimZ - pad);
   std::vector< float > groundTruth(sizeWithoutPadding, 0);
 
   // Baseline: Single threaded and OpenMP-parallelized CPU implementation
   {
-    std::vector< float > data(N, 0);
-    readData(data.data(), N);
     out << memInGiB << ',';
     double cpuDuration;
     if (measureSingleThreadedCPU) {
@@ -99,19 +100,29 @@ void benchmark(std::ostream& out, double memInGiB, int K, int inMaxThreadsPerBlo
     std::cout << "[CUDA] Error during GPU information retrieval, error was: " << cudaGetErrorString(error);
     return;
   } else {
-    std::vector< float > data(N, 0);
     std::vector< float > host_output(groundTruth.size(), 0);
-    readData(data.data(), N);
+
+    // For testing the multi GPU scenario, we want as baseline some memory M processed on a single GPU.
+    // In the multi GPU scenario, that memory should be split up on the devices, so each GPU processes only M/n_devices memory.
+    // That split and the according launch on the multi GPU version is done within "launchKernelMultiCUDAGPU".
 
     auto call_cuda_kernel = [&](int threadsPerBlock) -> bool {
       float elapsedTimeInMilliseconds = -1;
+      cudaError_t singleGPUError = launchKernel(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, 0, threadsPerBlock);
+      if (singleGPUError != cudaError_t::cudaSuccess) {
+        std::cerr << "[CUDA]  Error during single GPU launch, error was '" << cudaGetErrorString(singleGPUError) << "'\n";
+        return false;
+      }
+
+      out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
+
       cudaError_t cuda_kernel_error = launchKernelMultiCUDAGPU(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, threadsPerBlock);
       if (cuda_kernel_error != cudaError_t::cudaSuccess) {
         std::cerr << "[CUDA]  Error during Kernel launch, error was '" << cudaGetErrorString(cuda_kernel_error) << "'\n";
         return false;
       }
 
-      out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
+      out << ',' << elapsedTimeInMilliseconds;
 
       float maxCUDAError = computeMaxError(groundTruth.data(), host_output.data(), groundTruth.size());
       if (maxCUDAError > 1e-5) {
