@@ -110,18 +110,21 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
   auto partitioning = partitionVolumeForMultiGPU(nr_gpus, error, K, dimZ);
   HANDLE_ERROR(error);
 
-  std::vector< cudaStream_t > streams(nr_gpus);
-  std::vector< cudaEvent_t > timingEvents(2 * nr_gpus);
-  
-
-  // 3. Memory allocation on the devices.
-  //    Note that on older devices, the asynchronous API (i.e., cudaMallocAsync and its similar functions)
-  //    may not be supported. Thus, we rely on the "older" way of doing things, namely doing the *blocking*
-  //    calls, but concurrently on the CPU via regular CPU threads.
-
-  std::vector< int64_t >  gpuDataAllocationSizes(nr_gpus * 2);  // The sizes (input, output) of the allocations in bytes.
-  std::vector< float* >   gpuDataAllocations(nr_gpus * 2);      // The device allocation buffers for both the input and output data.
-  std::vector< int64_t* > gpuOffsetAllocations(nr_gpus);        // The device allocation buffers for the jump offsets.
+  // 2. Prepare some data structures for the multi GPU processing:
+  //     o timingEvents
+  //         Events for tracking the beginning and the end of a CUDA execution (memory transfer and kernel execution)
+  //         for each device.
+  //     o gpuDataAllocationSizes
+  //         Number of bytes of the input and output allocation for each device.
+  //     o gpuDataAllocations
+  //         Device allocation buffers for both the input and output data of the sizes specified in gpuDataAllocationSizes.
+  //     o gpuOffsetAllocations
+  //         Device allocations for offsets.
+  //
+  std::vector< cudaEvent_t >  timingEvents(2 * nr_gpus);
+  std::vector< int64_t >      gpuDataAllocationSizes(nr_gpus * 2);
+  std::vector< float* >       gpuDataAllocations(nr_gpus * 2);
+  std::vector< int64_t* >     gpuOffsetAllocations(nr_gpus);
 
   auto freeAllocations = [nr_gpus,&gpuDataAllocations,&gpuOffsetAllocations](bool sync = true) {
     if(sync) {
@@ -149,17 +152,14 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
   {
     cudaError_t threadLocal_error = cudaError_t::cudaSuccess;
 
-    #pragma omp parallel for
+    #pragma omp for
     for(int gpuID = 0; gpuID < nr_gpus; ++gpuID) {
       // Change the current device.
       threadLocal_error = cudaSetDevice(gpuID);
 
-      // 2. Create a stream for each device and events for synchronization/timing.
+      // 3. Create a stream for each device and events for synchronization/timing.
       //    Here we use the "cudaEventBlockingSync" flag to make the synchronization per device with this flag.
-      //    Since this blocks the host thread executing the synchronization command, we will do this on the
-      //    host in parallel later on.
       threadLocal_error = cudaSetDevice(gpuID);
-      threadLocal_error = cudaStreamCreate(&streams[gpuID]);
       threadLocal_error = cudaEventCreateWithFlags(&timingEvents[2*gpuID+0], cudaEventBlockingSync);
       threadLocal_error = cudaEventCreateWithFlags(&timingEvents[2*gpuID+1], cudaEventBlockingSync);
 
@@ -169,6 +169,7 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
       // Allocate memory for the data chunks (input and output) on the device.
       //  - The input memory blob includes the padding, as it was calculated by the partitioning function.
       //  - The output memory blob does not include the padding, thus we omit it.
+      // Note that these are _blocking_ calls, yet executed in different threads for each device.
       auto const& zPartition = partitioning[gpuID];
       int64_t zRange = zPartition.second - zPartition.first + 1ull; /* +1 since the upper z boundary is inclusive */
       gpuDataAllocationSizes[ inputIndex] = zRange * sliceSize * sizeof(float);
@@ -184,8 +185,6 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
       //         o  Copy the output values (without padding) back to the according host buffer.
       // 
       // Some notes on this:
-      //  - Each of the cuda functions of the above pattern (i.e., cudaMemcpyAsync and the kernel)
-      //    are *asynchronous*.
       //  - Each kernel invocation gets a defined chunk with the necessary padding, and also its own
       //    execution grid. Thus, the kernels omit the full three-dimensional boundary and the index
       //    calculations within each kernel stay correct, regardless of using one or more GPUs.
@@ -193,9 +192,8 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
       //    the input volume without padding. Consequently, only as much data points are written back
       //    to the buffer and the according statements do so by simple pointer arithmetic.
 
-      // Capture the execution start of this pattern for the given stream.
-      cudaStream_t& currentStream = streams[gpuID];
-      threadLocal_error = cudaEventRecord(timingEvents[inputIndex], currentStream);
+      // Capture the execution start.
+      threadLocal_error = cudaEventRecord(timingEvents[inputIndex]);
 
       // Do the pointer arithmetic to calculate where the input slices (including padding) start,
       // which is given by the offset calculated in the partitioning function, and where the begin
@@ -209,22 +207,22 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
       int64_t inputBytes  = gpuDataAllocationSizes[ inputIndex];
       int64_t outputBytes = gpuDataAllocationSizes[outputIndex];
 
-      int partitionDimZ = static_cast< int >(zPartition.second - zPartition.first + 1ull);
+      int partitionDimZ   = static_cast< int >(zPartition.second - zPartition.first + 1ull);
       float* dataInBegin  =  in + zPartition.first * sliceSize;
       float* dataOutBegin = out + zPartition.first * sliceSizeWithoutPadding;
 
-      // Copy the input data from the host to the device, i.e., enroll such an action in an asynchronous fashion on the current stream.
-      threadLocal_error = cudaMemcpyAsync(deviceDataIn,  dataInBegin, inputBytes,  cudaMemcpyHostToDevice, currentStream);
-      threadLocal_error = cudaMemcpyAsync(deviceOffsets, offsets,     offsetBytes, cudaMemcpyHostToDevice, currentStream);
+      // Copy the input data from the host to the device.
+      threadLocal_error = cudaMemcpy(deviceDataIn,  dataInBegin, inputBytes,  cudaMemcpyHostToDevice);
+      threadLocal_error = cudaMemcpy(deviceOffsets, offsets,     offsetBytes, cudaMemcpyHostToDevice);
 
       // Invoke the kernel (asynchronously), which processes its own chunk of data of a smaller size (in general).
       // Each kernel will run in its own non-default stream, allowing for a true GPU multithreading approach.
       int64_t voxelsInCurrentPartition = partitionDimZ * sliceSize;
       int64_t blocksPerGrid = (voxelsInCurrentPartition + threadsPerBlock - 1) / threadsPerBlock;
-      statisticsKernel<<< blocksPerGrid, threadsPerBlock, 0, currentStream >>>(deviceDataIn, deviceDataOut, deviceOffsets, K, voxelsInCurrentPartition, dimX, dimY, partitionDimZ);
-
+      statisticsKernel<<< blocksPerGrid, threadsPerBlock >>>(deviceDataIn, deviceDataOut, deviceOffsets, K, voxelsInCurrentPartition, dimX, dimY, partitionDimZ);
+      
       // Copy the computed result values back to the according buffer (asynchronously).
-      threadLocal_error = cudaMemcpyAsync(dataOutBegin, deviceDataOut, outputBytes, cudaMemcpyDeviceToHost, currentStream);
+      threadLocal_error = cudaMemcpy(dataOutBegin, deviceDataOut, outputBytes, cudaMemcpyDeviceToHost);
 
       // 5. Compute the elapsed time. Since time measurements in any multithreaded environment are particularly
       //    difficult, we record the elapsed time of each individual device and take the maximum of it.
@@ -234,10 +232,9 @@ cudaError_t launchKernelMultiCUDAGPU(float* out, float* in, int64_t N, int64_t* 
 
       float elapsedMs = 0.f;
       cudaEvent_t& stopEvent = timingEvents[2*gpuID+1];
-      threadLocal_error = cudaEventRecord(stopEvent, currentStream);
+      threadLocal_error = cudaEventRecord(stopEvent);
       threadLocal_error = cudaEventSynchronize(stopEvent);
       threadLocal_error = cudaEventElapsedTime(&elapsedMs, timingEvents[inputIndex], stopEvent);
-      threadLocal_error = cudaStreamDestroy(currentStream);
 
       #pragma omp critical
       {

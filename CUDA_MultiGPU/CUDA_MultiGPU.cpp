@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <random>
 #include <sstream>
 #include <thread>
 
@@ -44,9 +45,10 @@ constexpr int minLogThreadsPerBlock() {
 }
 
 void readData(float* buf, size_t N) {
-  // Simulate some data reading process. This is meant to replace
-  // any hard-coded values due to the memory mapping business below.
-  std::fill_n(buf, N, 1.f);
+  std::random_device rd;
+  std::mt19937 gen{rd()};
+  std::uniform_real_distribution<float> dist{-1,254};
+  std::generate_n(buf, N, [&](){ return dist(gen); });
 }
 
 void benchmark(std::ostream& out, double memInGiB, int K, int inMaxThreadsPerBlock, bool measureSingleThreadedCPU) {
@@ -100,7 +102,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, int inMaxThreadsPerBlo
     std::cout << "[CUDA] Error during GPU information retrieval, error was: " << cudaGetErrorString(error);
     return;
   } else {
-    std::vector< float > host_output(groundTruth.size(), 0);
+    std::vector< float > host_output(groundTruth.size(), 0.f);
 
     // For testing the multi GPU scenario, we want as baseline some memory M processed on a single GPU.
     // In the multi GPU scenario, that memory should be split up on the devices, so each GPU processes only M/n_devices memory.
@@ -116,6 +118,7 @@ void benchmark(std::ostream& out, double memInGiB, int K, int inMaxThreadsPerBlo
 
       out << ',' << threadsPerBlock << ',' << elapsedTimeInMilliseconds;
 
+      std::fill_n(host_output.data(), groundTruth.size(), -1.f);
       cudaError_t cuda_kernel_error = launchKernelMultiCUDAGPU(host_output.data(), data.data(), N, offsets.data(), K, dimX, dimY, dimZ, &elapsedTimeInMilliseconds, threadsPerBlock);
       if (cuda_kernel_error != cudaError_t::cudaSuccess) {
         std::cerr << "[CUDA]  Error during Kernel launch, error was '" << cudaGetErrorString(cuda_kernel_error) << "'\n";
