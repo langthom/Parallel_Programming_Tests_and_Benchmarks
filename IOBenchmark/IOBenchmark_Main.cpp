@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -44,6 +45,56 @@ class RawIO
 public:
   using Dimensions = std::array<long long, 3>;
 
+  enum class IOMethod {
+    C_FILE, CXX_FSTREAM, CXX_MMAP
+  };
+
+
+  template< IOMethod Method >
+  static std::pair<float, float> BenchmarkFullSliceIO(
+    Dimensions const& dims,
+    std::string const& fname,
+    std::vector<std::pair<Dimensions::value_type,Dimensions::value_type>> const& zs,
+    float* buffer
+  )
+  {
+    RawIO io{dims, fname};
+    float meanReadTime = 0.f, meanWriteTime = 0.f;
+
+    for (auto const [zStart, zEnd] : zs) {
+      meanReadTime  += io.ReadFullSlices< Method>(zStart, zEnd, buffer);
+      meanWriteTime += io.WriteFullSlices<Method>(zStart, zEnd, buffer);
+    }
+
+    meanReadTime  /= zs.size();
+    meanWriteTime /= zs.size();
+    return std::make_pair(meanReadTime, meanWriteTime);
+  }
+
+  template< IOMethod Method >
+  static std::pair<float, float> BenchmarkSmallRegionIO(
+    Dimensions const& dims,
+    std::string const& fname,
+    std::vector<std::array<Dimensions::value_type,6>> const& rois,
+    float* buffer
+  )
+  {
+    RawIO io{dims, fname};
+    float meanReadTime = 0.f, meanWriteTime = 0.f;
+
+    for (auto const& roi : rois) {
+      meanReadTime  += io.ReadEnvironment< Method>(roi, buffer);
+      meanWriteTime += io.WriteEnvironment<Method>(roi, buffer);
+    }
+
+    meanReadTime  /= rois.size();
+    meanWriteTime /= rois.size();
+    return std::make_pair(meanReadTime, meanWriteTime);
+  }
+
+  // -------------------
+
+
   RawIO(Dimensions const& dims, std::string const& fname) noexcept
     : Dims(dims)
     , InputFilename(fname)
@@ -52,7 +103,7 @@ public:
     this->OutputFilename = tempFPath.string();
 
     std::ofstream outf{this->OutputFilename.c_str(), std::ios::binary};
-    outf.seekp(this->Dims[2] * this->SliceSizeBytes() - 1, std::ios::beg);
+    outf.seekp(this->Dims[2] * this->SliceSize() * sizeof(unsigned short) - 1, std::ios::beg);
     outf.put('\0');
   }
 
@@ -61,29 +112,185 @@ public:
     std::filesystem::remove(this->OutputFilename);
   }
 
-  template< bool Input >
-  float FullSliceIO(int z, float* buffer) const
+
+  template< IOMethod Method >
+  float ReadFullSlices(Dimensions::value_type zStart, Dimensions::value_type zEnd, float* targetBuffer) const
   {
-    auto start = std::chrono::high_resolution_clock::now();
-    this->FullSliceIO(z, buffer, std::conditional_t<Input, std::true_type, std::false_type>{});
-    auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<float, std::milli>(end - start).count(); // fractional milliseconds
+    auto func = [&]() {
+      size_t const sliceSize  = this->SliceSize();
+      size_t const bufferSize = (zEnd - zStart + 1) * sliceSize;
+      size_t const rawOffset  = zStart * sliceSize * sizeof(unsigned short);
+
+      if constexpr (Method == IOMethod::C_FILE) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        std::FILE* file = std::fopen(this->InputFilename.c_str(), "rb");
+        if (file) {
+          std::fseek(file, rawOffset, SEEK_SET);
+          std::fread(uint16Buf.get(), sizeof(unsigned short), bufferSize, file);
+          std::fclose(file);
+        }
+        this->Copy(targetBuffer, uint16Buf.get(), bufferSize);
+
+      } else if constexpr (Method == IOMethod::CXX_FSTREAM) {
+        
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        std::ifstream file{this->InputFilename.c_str(), std::ios::binary};
+        file.seekg(rawOffset);
+        file.read(reinterpret_cast< char* >(uint16Buf.get()), bufferSize * sizeof(unsigned short));
+        this->Copy(targetBuffer, uint16Buf.get(), bufferSize);
+      
+      } else if constexpr (Method == IOMethod::CXX_MMAP) {
+      
+        mio::mmap_source file(this->InputFilename.c_str(), rawOffset, bufferSize * sizeof(unsigned short));
+        this->Copy(targetBuffer, reinterpret_cast< unsigned short const* >(file.data()), bufferSize);
+
+      }
+    };
+    return this->TimeOf(func);
   }
 
-  virtual std::string GetName() const = 0;
+
+  template< IOMethod Method >
+  float WriteFullSlices(Dimensions::value_type zStart, Dimensions::value_type zEnd, float* sourceBuffer) const
+  {
+    auto func = [&]() {
+      size_t const sliceSize  = this->SliceSize();
+      size_t const bufferSize = (zEnd - zStart + 1) * sliceSize;
+      size_t const rawOffset  = zStart * sliceSize * sizeof(unsigned short);
+
+      if constexpr (Method == IOMethod::C_FILE) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        this->Copy(uint16Buf.get(), sourceBuffer, bufferSize);
+
+        std::FILE* file = std::fopen(this->OutputFilename.c_str(), "r+b");
+        if (file) {
+          std::fseek(file, rawOffset, SEEK_SET);
+          std::fwrite(uint16Buf.get(), sizeof(unsigned short), bufferSize, file);
+          std::fclose(file);
+        }
+
+      } else if constexpr (Method == IOMethod::CXX_FSTREAM) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        this->Copy(uint16Buf.get(), sourceBuffer, bufferSize);
+
+        std::fstream file{this->OutputFilename.c_str(), std::ios::in | std::ios::out | std::ios::binary};
+        file.seekp(rawOffset);
+        file.write(reinterpret_cast< char const* >(uint16Buf.get()), bufferSize * sizeof(unsigned short));
+
+      } else if constexpr (Method == IOMethod::CXX_MMAP) {
+
+        mio::mmap_sink file(this->OutputFilename.c_str(), rawOffset, bufferSize * sizeof(unsigned short));
+        this->Copy(reinterpret_cast< unsigned short* >(file.data()), sourceBuffer, bufferSize);
+
+      }
+    };
+    return this->TimeOf(func);
+  }
+
+
+  template< IOMethod Method >
+  float ReadEnvironment(std::array<Dimensions::value_type, 6> const& roi, float* targetBuffer) const
+  {
+    // roi : xmin, xmax, ymin, ymax, zmin, zmax
+    auto func = [&]() {
+      size_t const envSize           = roi[1] - roi[0] + 1;
+      size_t const bufferSize        = envSize * envSize * envSize;
+      size_t const rawOffset         = ((roi[4] * this->Dims[1] + roi[2]) * this->Dims[0] + roi[0]) * sizeof(unsigned short);
+      size_t const yJump             = this->Dims[0] * sizeof(unsigned short);
+      size_t const zJump             = (this->Dims[1] - envSize) * this->Dims[0] * sizeof(unsigned short);
+
+      if constexpr (Method == IOMethod::C_FILE) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        unsigned short* uint16BufPtr = uint16Buf.get();
+
+        std::FILE* file = std::fopen(this->InputFilename.c_str(), "rb");
+        std::fseek(file, rawOffset, SEEK_SET);
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            std::fread(uint16BufPtr, sizeof(unsigned short), envSize, file);
+            uint16BufPtr += envSize;
+            std::fseek(file, yJump, SEEK_CUR);
+          }
+          std::fseek(file, zJump, SEEK_CUR);
+        }
+        
+        std::fclose(file);
+        this->Copy(targetBuffer, uint16Buf.get(), bufferSize);
+
+      } else if constexpr (Method == IOMethod::CXX_FSTREAM) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        unsigned short* uint16BufPtr = uint16Buf.get();
+
+        std::ifstream file{this->InputFilename.c_str(), std::ios::binary};
+        file.seekg(rawOffset);
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            file.read(reinterpret_cast< char* >(uint16BufPtr), envSize * sizeof(unsigned short));
+            uint16BufPtr += envSize;
+            file.seekg(yJump, std::ios::cur);
+          }
+          file.seekg(zJump, std::ios::cur);
+        }
+
+        this->Copy(targetBuffer, uint16Buf.get(), bufferSize);
+
+      } else if constexpr (Method == IOMethod::CXX_MMAP) {
+
+        size_t const mapp = ((this->Dims[1] + 1) * this->Dims[0] + 1) * envSize * sizeof(unsigned short);
+        mio::mmap_source file(this->InputFilename.c_str(), rawOffset, mapp);
+        float* buf = targetBuffer;
+        char const* source = file.data();
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            this->Copy(buf, reinterpret_cast< unsigned short const* >(source), envSize);
+            buf += envSize;
+            source += yJump;
+          }
+          source += zJump;
+        }
+      }
+
+    };
+    return this->TimeOf(func);
+  }
+
+
+  template< IOMethod Method >
+  float WriteEnvironment(std::array<Dimensions::value_type, 6> const& roi, float* targetBuffer) const
+  {
+    auto func = [&]() {
+
+      if constexpr (Method == IOMethod::C_FILE) {
+      } else if constexpr (Method == IOMethod::CXX_FSTREAM) {
+      } else if constexpr (Method == IOMethod::CXX_MMAP) {
+      }
+    };
+    return this->TimeOf(func);
+  }
+
 
 protected:
-  virtual void FullSliceIO(int z, float* target, std::true_type)  const = 0;
-  virtual void FullSliceIO(int z, float* source, std::false_type) const = 0;
+
+  template< class Func, class... Args >
+  inline float TimeOf(Func&& func, Args&&... args) const
+  {
+    auto start = std::chrono::high_resolution_clock::now();
+    func(std::forward<Args>(args)...);
+    auto end = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration<float, std::milli>(end - start).count();
+  }
 
   inline size_t SliceSize() const
   {
     return this->Dims.at(0) * this->Dims.at(1);
-  }
-
-  inline size_t SliceSizeBytes() const
-  {
-    return this->SliceSize() * sizeof(unsigned short);
   }
 
   template< class From, class To >
@@ -95,6 +302,7 @@ protected:
     }
   }
 
+
 protected:
   Dimensions Dims;
   std::string InputFilename;
@@ -102,139 +310,6 @@ protected:
 };
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
-
-class CFileIO : public RawIO
-{
-public:
-
-  using RawIO::RawIO;
-
-protected:
-
-  void FullSliceIO(int z, float* target, std::true_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-    auto uint16Buf = std::make_unique< unsigned short[] >(sliceSize);
-
-    std::FILE* file = std::fopen(this->InputFilename.c_str(), "rb");
-    if (file) {
-      std::fseek(file, z * sliceSizeBytes, SEEK_SET);
-      std::fread(uint16Buf.get(), sizeof(unsigned short), sliceSize, file);
-      std::fclose(file);
-    }
-
-    this->Copy(target, uint16Buf.get(), sliceSize);
-  }
-
-  void FullSliceIO(int z, float* source, std::false_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-    auto uint16Buf = std::make_unique< unsigned short[] >(sliceSize);
-
-    this->Copy(uint16Buf.get(), source, sliceSize);
-
-    std::FILE* file = std::fopen(this->OutputFilename.c_str(), "r+b");
-    if (file) {
-      std::fseek(file, z * sliceSizeBytes, SEEK_SET);
-      std::fwrite(uint16Buf.get(), sizeof(unsigned short), sliceSize, file);
-      std::fclose(file);
-    }
-  }
-
-  std::string GetName() const override
-  {
-    return "C file API";
-  }
-};
-
-/* ------------------------------------------------------------------------------------------------------------------------------------------------- */
-
-class FStreamIO : public RawIO
-{
-public:
-
-  using RawIO::RawIO;
-
-protected:
-
-  void FullSliceIO(int z, float* target, std::true_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-    auto uint16Buf = std::make_unique< unsigned short[] >(sliceSize);
-
-    std::ifstream file{this->InputFilename.c_str(), std::ios::binary};
-    file.seekg(z * sliceSizeBytes);
-    file.read(reinterpret_cast< char* >(uint16Buf.get()), sliceSizeBytes);
-
-    this->Copy(target, uint16Buf.get(), sliceSize);
-  }
-
-  void FullSliceIO(int z, float* source, std::false_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-    auto uint16Buf = std::make_unique< unsigned short[] >(sliceSize);
-
-    this->Copy(uint16Buf.get(), source, sliceSize);
-
-    std::fstream file{this->OutputFilename.c_str(), std::ios::in | std::ios::out | std::ios::binary};
-    file.seekp(z * sliceSizeBytes);
-    file.write(reinterpret_cast< char const* >(uint16Buf.get()), sliceSizeBytes);
-  }
-
-  std::string GetName() const override
-  {
-    return "C++ fstream API";
-  }
-};
-
-/* ------------------------------------------------------------------------------------------------------------------------------------------------- */
-
-class MmapIO : public RawIO
-{
-public:
-
-  using RawIO::RawIO;
-
-protected:
-
-  void FullSliceIO(int z, float* target, std::true_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-
-    mio::mmap_source file(this->InputFilename.c_str(), z * sliceSizeBytes, sliceSizeBytes);
-    this->Copy(target, reinterpret_cast< unsigned short const* >(file.data()), sliceSize);
-  }
-
-  void FullSliceIO(int z, float* source, std::false_type) const override
-  {
-    size_t const sliceSize      = this->SliceSize();
-    size_t const sliceSizeBytes = this->SliceSizeBytes();
-
-    mio::mmap_sink file(this->OutputFilename.c_str(), z * sliceSizeBytes, sliceSizeBytes);
-    this->Copy(reinterpret_cast< unsigned short* >(file.data()), source, sliceSize);
-  }
-
-  std::string GetName() const override
-  {
-    return "C++ memory mapped files";
-  }
-};
-
-/* ------------------------------------------------------------------------------------------------------------------------------------------------- */
-
-void PrintBenchmarkResults(std::string const& api, float meanReadTime, float meanWriteTime)
-{
-#define FMT std::setw(8) << std::scientific << std::setprecision(2)
-  std::cout << "  Consdering " << api << '\n';
-  std::cout << "    o Average read  time: " << FMT << meanReadTime  << " [ms]\n";
-  std::cout << "    o Average write time: " << FMT << meanWriteTime << " [ms]\n";
-}
-
 
 std::tuple< RawIO::Dimensions, std::string > ParseMhd(std::string const& mhdFile)
 {
@@ -256,41 +331,79 @@ std::tuple< RawIO::Dimensions, std::string > ParseMhd(std::string const& mhdFile
   return std::make_tuple(volumeDims, rawFile);
 }
 
-void BenchmarkFullSliceIO(RawIO::Dimensions const& volumeDims, std::string const& rawFile, int numberOfFullSlices)
+
+void PrintBenchmarkResults(std::string const& api, size_t sizeBytes, float meanReadTime, float meanWriteTime)
 {
-  std::vector<int> zs(numberOfFullSlices);
+#define FMT std::setw(8) << std::scientific << std::setprecision(2)
+  float const size_GiB = static_cast< float >(sizeBytes) / static_cast< float >(1ull << 30);
+  std::cout << "  Consdering " << api << '\n';
+  std::cout << "    o Average read  time: " << FMT << meanReadTime  << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanReadTime)  << " [GiB/s])\n";
+  std::cout << "    o Average write time: " << FMT << meanWriteTime << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanWriteTime) << " [GiB/s])\n";
+#undef FMT
+}
+
+void BenchmarkFullSliceIO(RawIO::Dimensions const& volumeDims, std::string const& rawFile, int numberOfFullSlices, int EnvSize)
+{
+  std::random_device rd;
+  std::mt19937 gen{rd()};
+  std::uniform_int_distribution<RawIO::Dimensions::value_type> dist{0, volumeDims[2]-EnvSize-1};
+
+  std::vector<std::pair<RawIO::Dimensions::value_type, RawIO::Dimensions::value_type>> zs;
+  zs.reserve(numberOfFullSlices);
+
   for (int i = 0; i < numberOfFullSlices; ++i) {
-    zs[i] = static_cast< int >(static_cast< float >(i) * volumeDims[2] / numberOfFullSlices);
+    auto start = dist(gen);
+    zs.emplace_back(start, start + EnvSize - 1);
   }
 
-  auto buffer = std::make_unique< float[] >(volumeDims.at(0) * volumeDims.at(1));
+  size_t const bufSize = EnvSize * volumeDims.at(0) * volumeDims.at(1);
+  auto buffer = std::make_unique< float[] >(bufSize);
+  auto bufferPtr = buffer.get();
 
-  auto benchmark = [zs, &buffer](std::unique_ptr< RawIO > const& io) {
-    float meanReadTime = 0.f, meanWriteTime = 0.f;
-    for (int z : zs) {
-      meanReadTime  += io->FullSliceIO<true >(z, buffer.get());
-      meanWriteTime += io->FullSliceIO<false>(z, buffer.get());
-    }
-    meanReadTime  /= zs.size();
-    meanWriteTime /= zs.size();
-    PrintBenchmarkResults(io->GetName(), meanReadTime, meanWriteTime);
-  };
-
-  std::vector<std::unique_ptr<RawIO>> ios;
-  ios.emplace_back(new FStreamIO{volumeDims, rawFile});
-  ios.emplace_back(new CFileIO{volumeDims, rawFile});
-  ios.emplace_back(new MmapIO{volumeDims, rawFile});
-
-  std::cout << "Full slice I/O:\n";
-  for (auto const& io : ios) {
-    benchmark(io);
-  }
+  auto const [api1_read, api1_write] = RawIO::BenchmarkFullSliceIO<RawIO::IOMethod::C_FILE     >(volumeDims, rawFile, zs, bufferPtr);
+  auto const [api2_read, api2_write] = RawIO::BenchmarkFullSliceIO<RawIO::IOMethod::CXX_FSTREAM>(volumeDims, rawFile, zs, bufferPtr);
+  auto const [api3_read, api3_write] = RawIO::BenchmarkFullSliceIO<RawIO::IOMethod::CXX_MMAP   >(volumeDims, rawFile, zs, bufferPtr);
+  std::cout << "Full slice I/O   (full slices; envSize = " << EnvSize << "):\n";
+  PrintBenchmarkResults("C file API",              bufSize, api1_read, api1_write);
+  PrintBenchmarkResults("C++ fstream API",         bufSize, api2_read, api2_write);
+  PrintBenchmarkResults("C++ memory mapped files", bufSize, api3_read, api3_write);
+  std::cout << '\n';
 }
 
-void BenchmarkCuboidRoIsIO(RawIO::Dimensions const& volumeDims, std::string const& rawFile, int numberOfCuboidRoIs)
+void BenchmarkCuboidRoIsIO(RawIO::Dimensions const& volumeDims, std::string const& rawFile, int numberOfCuboidRoIs, int EnvSize)
 {
-}
+  std::random_device rd;
+  std::mt19937 gen{rd()};
+  std::uniform_int_distribution<RawIO::Dimensions::value_type> distX{0, volumeDims[0]-EnvSize-1};
+  std::uniform_int_distribution<RawIO::Dimensions::value_type> distY{0, volumeDims[1]-EnvSize-1};
+  std::uniform_int_distribution<RawIO::Dimensions::value_type> distZ{0, volumeDims[2]-EnvSize-1};
 
+  std::vector<std::array<RawIO::Dimensions::value_type, 6>> zs;
+  zs.reserve(numberOfCuboidRoIs);
+
+  for (int i = 0; i < numberOfCuboidRoIs; ++i) {
+    auto const X = distX(gen);
+    auto const Y = distY(gen);
+    auto const Z = distZ(gen);
+    std::array<RawIO::Dimensions::value_type, 6> const roi{
+      X, X+EnvSize-1, Y, Y+EnvSize-1, Z, Z+EnvSize-1
+    };
+    zs.emplace_back(roi);
+  }
+
+  size_t const bufSize = EnvSize * EnvSize * EnvSize;
+  auto buffer = std::make_unique< float[] >(bufSize);
+  auto bufferPtr = buffer.get();
+
+  auto const [api1_read, api1_write] = RawIO::BenchmarkSmallRegionIO<RawIO::IOMethod::C_FILE     >(volumeDims, rawFile, zs, bufferPtr);
+  auto const [api2_read, api2_write] = RawIO::BenchmarkSmallRegionIO<RawIO::IOMethod::CXX_FSTREAM>(volumeDims, rawFile, zs, bufferPtr);
+  auto const [api3_read, api3_write] = RawIO::BenchmarkSmallRegionIO<RawIO::IOMethod::CXX_MMAP   >(volumeDims, rawFile, zs, bufferPtr);
+  std::cout << "Full slice I/O   (local environments; envSize = " << EnvSize << "):\n";
+  PrintBenchmarkResults("C file API",              bufSize, api1_read, api1_write);
+  PrintBenchmarkResults("C++ fstream API",         bufSize, api2_read, api2_write);
+  PrintBenchmarkResults("C++ memory mapped files", bufSize, api3_read, api3_write);
+  std::cout << '\n';
+}
 
 void RunBenchmarks(std::string const& mhdFile, int numberOfFullSlices, int numberOfCuboidRoIs)
 {
@@ -298,8 +411,10 @@ void RunBenchmarks(std::string const& mhdFile, int numberOfFullSlices, int numbe
   std::string rawFile;
   std::tie(volumeDims, rawFile) = ParseMhd(mhdFile);
 
-  BenchmarkFullSliceIO(volumeDims, rawFile, std::min<RawIO::Dimensions::value_type>(volumeDims[2], numberOfFullSlices));
-  BenchmarkCuboidRoIsIO(volumeDims, rawFile, numberOfCuboidRoIs);
+  for (int envSize : {3, 5, 7, 9}) {
+    BenchmarkFullSliceIO( volumeDims, rawFile, numberOfFullSlices, envSize);
+    BenchmarkCuboidRoIsIO(volumeDims, rawFile, numberOfCuboidRoIs, envSize);
+  }
 }
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
