@@ -264,14 +264,71 @@ public:
 
 
   template< IOMethod Method >
-  float WriteEnvironment(std::array<Dimensions::value_type, 6> const& roi, float* targetBuffer) const
+  float WriteEnvironment(std::array<Dimensions::value_type, 6> const& roi, float* sourceBuffer) const
   {
+    // roi : xmin, xmax, ymin, ymax, zmin, zmax
     auto func = [&]() {
+      size_t const envSize           = roi[1] - roi[0] + 1;
+      size_t const bufferSize        = envSize * envSize * envSize;
+      size_t const rawOffset         = ((roi[4] * this->Dims[1] + roi[2]) * this->Dims[0] + roi[0]) * sizeof(unsigned short);
+      size_t const yJump             = this->Dims[0] * sizeof(unsigned short);
+      size_t const zJump             = (this->Dims[1] - envSize) * this->Dims[0] * sizeof(unsigned short);
 
       if constexpr (Method == IOMethod::C_FILE) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        unsigned short* uint16BufPtr = uint16Buf.get();
+        this->Copy(uint16Buf.get(), sourceBuffer, bufferSize);
+
+        std::FILE* file = std::fopen(this->OutputFilename.c_str(), "r+b");
+        std::fseek(file, rawOffset, SEEK_SET);
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            std::fwrite(uint16BufPtr, sizeof(unsigned short), envSize, file);
+            uint16BufPtr += envSize;
+            std::fseek(file, yJump, SEEK_CUR);
+          }
+          std::fseek(file, zJump, SEEK_CUR);
+        }
+
+        std::fclose(file);
+
       } else if constexpr (Method == IOMethod::CXX_FSTREAM) {
+
+        auto uint16Buf = std::make_unique< unsigned short[] >(bufferSize);
+        unsigned short* uint16BufPtr = uint16Buf.get();
+        this->Copy(uint16Buf.get(), sourceBuffer, bufferSize);
+
+        std::fstream file{this->OutputFilename.c_str(), std::ios::in | std::ios::out | std::ios::binary};
+        file.seekp(rawOffset);
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            file.write(reinterpret_cast< char const* >(uint16BufPtr), envSize * sizeof(unsigned short));
+            uint16BufPtr += envSize;
+            file.seekp(yJump, std::ios::cur);
+          }
+          file.seekp(zJump, std::ios::cur);
+        }
+
       } else if constexpr (Method == IOMethod::CXX_MMAP) {
+
+        size_t const mapp = ((this->Dims[1] + 1) * this->Dims[0] + 1) * envSize * sizeof(unsigned short);
+        mio::mmap_sink file(this->OutputFilename.c_str(), rawOffset, mapp);
+        float const* buf = sourceBuffer;
+        char* target = file.data();
+
+        for (Dimensions::value_type z = roi[4]; z <= roi[5]; ++z) {
+          for (Dimensions::value_type y = roi[2]; y <= roi[3]; ++y) {
+            this->Copy(reinterpret_cast< unsigned short* >(target), buf, envSize);
+            buf += envSize;
+            target += yJump;
+          }
+          target += zJump;
+        }
       }
+
     };
     return this->TimeOf(func);
   }
