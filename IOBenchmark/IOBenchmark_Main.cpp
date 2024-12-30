@@ -38,6 +38,9 @@
 
 #include "mio.hpp"      // C++ memory mapped file I/O
 
+#include "ChunkedCopier.h"
+
+
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
 
 class RawIO
@@ -394,8 +397,8 @@ void PrintBenchmarkResults(std::string const& api, size_t sizeBytes, float meanR
 #define FMT std::setw(8) << std::scientific << std::setprecision(2)
   float const size_GiB = static_cast< float >(sizeBytes) / static_cast< float >(1ull << 30);
   std::cout << "  Consdering " << api << '\n';
-  std::cout << "    o Average read  time: " << FMT << meanReadTime  << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanReadTime)  << " [GiB/s])\n";
-  std::cout << "    o Average write time: " << FMT << meanWriteTime << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanWriteTime) << " [GiB/s])\n";
+  std::cout << "    o Read  time: " << FMT << meanReadTime  << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanReadTime)  << " [GiB/s])\n";
+  std::cout << "    o Write time: " << FMT << meanWriteTime << " [ms]  (-> " << FMT << (size_GiB * 1000.f / meanWriteTime) << " [GiB/s])\n";
 #undef FMT
 }
 
@@ -474,6 +477,52 @@ void RunBenchmarks(std::string const& mhdFile, int numberOfFullSlices, int numbe
   }
 }
 
+
+void BenchmarkQueuedCopying(std::string const& mhdFile)
+{
+  auto const [dims, rawFile] = ParseMhd(mhdFile);
+  auto tempFPath = (std::filesystem::temp_directory_path() / std::filesystem::path(rawFile).filename()).string();
+
+  // Initialize the target file.
+  {
+    auto size = std::filesystem::file_size(rawFile);
+    std::ofstream targetFile{tempFPath, std::ios::binary};
+    targetFile.seekp(size - 1, std::ios::cur);
+    targetFile.put('\0');
+  }
+
+  size_t const numSlices = 32;
+  size_t const nTiles    = (dims.at(2) + numSlices - 1) / numSlices;
+  size_t const sliceSize = dims.at(0) * dims.at(1);
+
+  std::vector<std::pair<size_t, size_t>> chunks;
+  chunks.reserve(nTiles);
+
+  for (size_t tileIx = 0; tileIx < nTiles; ++tileIx) {
+    size_t const offset    = tileIx * numSlices * sliceSize;
+    size_t const numSlcs   = tileIx + 1 == nTiles ? (dims.at(2) - tileIx * numSlices) : numSlices;
+    size_t const chunkSize = numSlcs * sliceSize;
+    chunks.emplace_back(offset, chunkSize);
+  }
+
+  io::QueueChunkedCopier copier;
+  copier.SetParameters(rawFile, tempFPath, nTiles);
+
+  float const sizeGiB = dims.at(0) * dims.at(1) * dims.at(2) * sizeof(float) / (1ull << 30);
+
+#define FMT std::setprecision(2) << std::scientific
+  float const nonThreadingTime = copier.NonThreadingCopying(chunks);
+  std::cout << " Classical copying:   " << FMT << nonThreadingTime << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime) << " [GiB/s])\n";
+
+  float const manualTime = copier.ManuallyOverlappingCopying(chunks);
+  std::cout << " Manual overlap copy: " << FMT <<       manualTime << " [s] (~ " << FMT << (sizeGiB / manualTime)       << " [GiB/s])\n";
+
+  float const threadingTime = copier.ThreadingCopying(chunks);
+  std::cout << " Threaded  copying:   " << FMT <<    threadingTime << " [s] (~ " << FMT << (sizeGiB / threadingTime)    << " [GiB/s])\n";
+#undef FMT
+}
+
+
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
 
 int main(int argc, char** argv) {
@@ -496,5 +545,7 @@ int main(int argc, char** argv) {
   };
 
   RunBenchmarks(argv[1], parseInt(argv[2]), parseInt(argv[3]));
+  std::cout << std::string(80, '=') << '\n';
+  BenchmarkQueuedCopying(argv[1]);
   return EXIT_SUCCESS;
 }

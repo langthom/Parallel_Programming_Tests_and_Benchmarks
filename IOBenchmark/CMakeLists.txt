@@ -20,7 +20,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-add_executable(IOBench IOBenchmark_Main.cpp mio.hpp)
+add_executable(IOBench 
+  IOBenchmark_Main.cpp
+  mio.hpp
+  ChunkedCopier.h
+  ChunkedCopier.cpp
+)
+
 target_compile_features(IOBench PRIVATE cxx_std_17)
 
 find_package(OpenMP)
