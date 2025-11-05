@@ -384,6 +384,12 @@ bool isNear(float* expected, float* got, long long N, double tol) {
 
 int main(int argc, char** argv) {
 
+  bool disableGPU = false;
+  if (argc == 2) {
+    std::cout << "[Additional command line argument detected -> disabling GPU test]\n\n";
+    disableGPU = true;
+  }
+
   std::vector<double> sizesGB{1/8., 1/4., 1/2., 1.0, 2.0};
   int nRuns = 20;
 
@@ -412,7 +418,9 @@ int main(int argc, char** argv) {
     BENCHMARK( 8, nRuns);
     BENCHMARK( 9, nRuns);
     BENCHMARK(10, nRuns);
-    BENCHMARK(11, nRuns);
+    if (!disableGPU) {
+      BENCHMARK(11, nRuns);
+    }
     BENCHMARK(12, nRuns);
     BENCHMARK(13, nRuns);
     BENCHMARK(14, nRuns);
