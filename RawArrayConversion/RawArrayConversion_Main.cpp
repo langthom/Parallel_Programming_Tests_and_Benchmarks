@@ -1,4 +1,4 @@
-/*
+﻿/*
  * MIT License
  * 
  * Copyright (c) 2023 Dr. Thomas Lang
@@ -24,6 +24,7 @@
 #define NOMINMAX
 
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -62,14 +63,14 @@ void Copy2(float* __restrict target, unsigned short* __restrict source, long lon
 }
 
 void Copy3(float* target, unsigned short* source, long long N) {
-  #pragma omp parallel for if(N > 128)
+  #pragma omp parallel
   for (long long i = 0; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
 }
 
 void Copy4(float* __restrict target, unsigned short* __restrict source, long long N) {
-#pragma omp parallel for if(N > 128)
+  #pragma omp parallel
   for (long long i = 0; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
@@ -243,7 +244,8 @@ bool isNear(float* expected, float* got, long long N, double tol) {
   if (M > 1) { \
     std /= (M-1); \
   } \
-  std::cout << "  - Method " << std::setw(2) << i << ":  " << FLOAT_FMT << avg << " +/- " << FLOAT_FMT << std << " [s]\n"; \
+  double gbps = sizeGB / avg; \
+  std::cout << "  - Method " << std::setw(2) << i << ":  " << FLOAT_FMT << avg << " +/- " << FLOAT_FMT << std << " [s] (~ " << gbps << " [GB/s])\n"; \
   avgs.push_back(avg); \
 } while(false);
 
@@ -252,8 +254,8 @@ bool isNear(float* expected, float* got, long long N, double tol) {
 
 int main(int argc, char** argv) {
 
-  std::vector<double> sizesGB{1/128., 1/8., 1/2., 2.0};
-  int nRuns = 20;
+  std::vector<double> sizesGB{1/8., 1/4., 1/2., 1.0, 2.0};
+  int nRuns = 50;
 
   for (double sizeGB : sizesGB) {
     long long N;
