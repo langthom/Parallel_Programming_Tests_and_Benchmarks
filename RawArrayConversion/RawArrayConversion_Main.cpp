@@ -382,15 +382,25 @@ bool isNear(float* expected, float* got, long long N, double tol) {
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------- */
 
+double ParseDouble(char const* str) {
+  std::istringstream iss{str};
+  double val;
+  iss >> val;
+  return val;
+}
+
 int main(int argc, char** argv) {
 
-  bool disableGPU = false;
-  if (argc == 2) {
-    std::cout << "[Additional command line argument detected -> disabling GPU test]\n\n";
-    disableGPU = true;
+  if (argc < 3) {
+    std::cerr << "Usage: " << argv[0] << " <disableGPU:y/n>  <sizeGB:float>...\n";
+    return EXIT_FAILURE;
   }
 
-  std::vector<double> sizesGB{1/8., 1/4., 1/2., 1.0, 2.0};
+  bool disableGPU = argv[1][0] == 'y';
+
+  std::vector<double> sizesGB(argc-2);
+  std::transform(argv+2, argv+argc, sizesGB.begin(), ParseDouble);
+
   int nRuns = 20;
 
   for (double sizeGB : sizesGB) {
@@ -418,7 +428,10 @@ int main(int argc, char** argv) {
     BENCHMARK( 8, nRuns);
     BENCHMARK( 9, nRuns);
     BENCHMARK(10, nRuns);
-    if (!disableGPU) {
+    if (disableGPU) {
+      std::cout << "  - Method 11:  disabled\n";
+      avgs.push_back(std::numeric_limits<double>::max());
+    } else {
       BENCHMARK(11, nRuns);
     }
     BENCHMARK(12, nRuns);
