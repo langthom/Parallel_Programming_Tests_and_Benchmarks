@@ -35,11 +35,17 @@
 #include <thread>
 #include <tuple>
 
+#include <immintrin.h>
+#include <emmintrin.h>
+#include <smmintrin.h>
+
 #include "RawArrayConversion.h"
 
 std::unique_ptr< unsigned short[] > GetData(double memInGiB, long long& N) {
   N = static_cast< long long >(memInGiB * (1ull << 30) / sizeof(unsigned short));
   auto data = std::make_unique< unsigned short[] >(N);
+  std::iota(data.get(), data.get()+N, 0);
+  return data;
 
   std::random_device rd;
   std::default_random_engine re(rd());
@@ -88,6 +94,7 @@ void Copy5(float* target, unsigned short* source, long long N) {
     target[i+6] = static_cast< float >(source[i+6]);
     target[i+7] = static_cast< float >(source[i+7]);
   }
+  i -= 8;
   for (; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
@@ -105,6 +112,7 @@ void Copy6(float* __restrict target, unsigned short* __restrict source, long lon
     target[i+6] = static_cast< float >(source[i+6]);
     target[i+7] = static_cast< float >(source[i+7]);
   }
+  i -= 8;
   for (; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
@@ -135,6 +143,7 @@ void Copy8(float* target, unsigned short* source, long long N) { // taken from h
     _mm_store_ps(target + i + 0,vf0);
     _mm_store_ps(target + i + 4,vf1);
   }
+  i -= 8;
   for (; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
@@ -161,6 +170,7 @@ void Copy9(float* __restrict target, unsigned short* __restrict source, long lon
     _mm_store_ps(target + i + 0,vf0);
     _mm_store_ps(target + i + 4,vf1);
   }
+  i -= 8;
   for (; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
@@ -169,12 +179,98 @@ void Copy9(float* __restrict target, unsigned short* __restrict source, long lon
 void Copy10(float* __restrict target, unsigned short* __restrict source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
   long long i = 0;
   for (; i < N; i += 16) {
+    // Load 128 bit integer data (-> 128 bit == 8x unsigned short)
+    //  a0 = [ u16_1, u16_2, u16_3, u16_4, u16_5, u16_6, u16_7, u16_8 ]
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i a1 = _mm_load_si128((const __m128i*)(source + i + 8));
+
+    //  Split into two registers (little endian!)
+    //  a0 = [ u16_1, u16_2, u16_3, u16_4 | u16_5, u16_6, u16_7, u16_8 ]
+    //  b0 = [ u16_5, u16_6, u16_7, u16_8 | u16_5, u16_6, u16_7, u16_8 ]
+    __m128i b0 = _mm_unpackhi_epi64(a0,a0);
+    __m128i b1 = _mm_unpackhi_epi64(a1,a1);
+
+    //  Convert to 32-bit integers
+    //  a0 = [ int32(u16_1), int32(u16_2), int32(u16_3), int32(u16_4) ]
+    //  b0 = [ int32(u16_5), int32(u16_6), int32(u16_7), int32(u16_8) ]
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    a1 = _mm_cvtepu16_epi32(a1);
+    b1 = _mm_cvtepu16_epi32(b1);
+
+    //  Convert to float32
+    //  c0 = [ float32(u16_1), float32(u16_2), float32(u16_3), float32(u16_4) ]
+    //  d0 = [ float32(u16_5), float32(u16_6), float32(u16_7), float32(u16_8) ]
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    __m128 c1 = _mm_cvtepi32_ps(a1);
+    __m128 d1 = _mm_cvtepi32_ps(b1);
+
+    //  Store
+    _mm_store_ps(target + i +  0,c0);
+    _mm_store_ps(target + i +  4,d0);
+    _mm_store_ps(target + i +  8,c1);
+    _mm_store_ps(target + i + 12,d1);
+  }
+
+  i -= 16;
+  for (; i < N; ++i) {
+    target[i] = static_cast< float >(source[i]);
+  }
+}
+
+void Copy11(float* __restrict target, unsigned short* __restrict source, long long N) {
+  cudaRawArrayConversion(target, source, N);
+}
+
+void Copy12(float* target, unsigned short* source, long long N) {
+  #pragma omp parallel for
+  for (long long i = 0; i < N; i += 8) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+  }
+
+  long long rem = (N / 8) * 8;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+void Copy13(float* __restrict target, unsigned short* __restrict source, long long N) {
+#pragma omp parallel for
+  for (long long i = 0; i < N; i += 8) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+  }
+
+  long long rem = (N / 8) * 8;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+void Copy14(float* target, unsigned short* source, long long N) {
+
+  #pragma omp parallel for
+  for (long long i = 0; i < N; i += 16) {
     __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
     __m128i a1 = _mm_load_si128((const __m128i*)(source + i + 8));
 
     //  Split into two registers
-    __m128i b0 = _mm_unpackhi_epi64(a0,a0);
-    __m128i b1 = _mm_unpackhi_epi64(a1,a1);
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    __m128i b1 = _mm_unpackhi_epi64(a1, a1);
 
     //  Convert to 32-bit integers
     a0 = _mm_cvtepu16_epi32(a0);
@@ -189,20 +285,54 @@ void Copy10(float* __restrict target, unsigned short* __restrict source, long lo
     __m128 d1 = _mm_cvtepi32_ps(b1);
 
     //  Store
-    _mm_store_ps(target + i +  0,c0);
-    _mm_store_ps(target + i +  4,d0);
-    _mm_store_ps(target + i +  8,c1);
-    _mm_store_ps(target + i + 12,d1);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+    _mm_store_ps(target + i + 8, c1);
+    _mm_store_ps(target + i + 12, d1);
   }
 
-  for (; i < N; ++i) {
-    target[i] = static_cast< float >(source[i]);
+  long long rem = (N / 16) * 16;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
   }
 }
 
-void Copy11(float* __restrict target, unsigned short* __restrict source, long long N) {
-  cudaRawArrayConversion(target, source, N);
+void Copy15(float* __restrict target, unsigned short* __restrict source, long long N) {
+
+  #pragma omp parallel for
+  for (long long i = 0; i < N; i += 16) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i a1 = _mm_load_si128((const __m128i*)(source + i + 8));
+
+    //  Split into two registers
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    __m128i b1 = _mm_unpackhi_epi64(a1, a1);
+
+    //  Convert to 32-bit integers
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    a1 = _mm_cvtepu16_epi32(a1);
+    b1 = _mm_cvtepu16_epi32(b1);
+
+    //  Convert to float
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    __m128 c1 = _mm_cvtepi32_ps(a1);
+    __m128 d1 = _mm_cvtepi32_ps(b1);
+
+    //  Store
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+    _mm_store_ps(target + i + 8, c1);
+    _mm_store_ps(target + i + 12, d1);
+  }
+
+  long long rem = (N / 16) * 16;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
 }
+
 
 
 // Preprocessor solutions to allow for different function parameter list qualifiers (restricted) without implicit decay or so.
@@ -230,12 +360,12 @@ bool isNear(float* expected, float* got, long long N, double tol) {
   for (int run = 0; run < M; ++run) { \
     ELAPSED_S(i); \
     times[run] = elapsed ## i; \
+    if (!isNear(dataOutExp.get(), dataOut, N, 1e-9)) { \
+      std::cerr << " *** Method " << i << " produce invalid copy!\n"; \
+      return EXIT_FAILURE; \
+    } \
+    std::memset(dataOut, 0, N * sizeof(float)); \
   } \
-  if (!isNear(dataOutExp.get(), dataOut, N, 1e-5)) { \
-    std::cerr << " *** Method " << i << " produce invalid copy!\n"; \
-    return EXIT_FAILURE; \
-  } \
-  std::memset(dataOut, 0, N * sizeof(float)); \
   double avg = std::accumulate(times.cbegin(), times.cend(), 0.0); \
   double std = 0.0; \
   for (int run = 0; run < M; ++run) { \
@@ -255,7 +385,7 @@ bool isNear(float* expected, float* got, long long N, double tol) {
 int main(int argc, char** argv) {
 
   std::vector<double> sizesGB{1/8., 1/4., 1/2., 1.0, 2.0};
-  int nRuns = 50;
+  int nRuns = 20;
 
   for (double sizeGB : sizesGB) {
     long long N;
@@ -283,6 +413,10 @@ int main(int argc, char** argv) {
     BENCHMARK( 9, nRuns);
     BENCHMARK(10, nRuns);
     BENCHMARK(11, nRuns);
+    BENCHMARK(12, nRuns);
+    BENCHMARK(13, nRuns);
+    BENCHMARK(14, nRuns);
+    BENCHMARK(15, nRuns);
 
     int bestMethod = static_cast< int >(std::distance(avgs.begin(), std::min_element(avgs.begin(), avgs.end()))+1/*offset in indexing*/);
     std::cout << "  => Best method: " << bestMethod << "\n\n";
