@@ -1,4 +1,4 @@
-/*
+﻿/*
  * MIT License
  * 
  * Copyright (c) 2024 Dr. Thomas Lang
@@ -511,14 +511,25 @@ void BenchmarkQueuedCopying(std::string const& mhdFile)
   float const sizeGiB = dims.at(0) * dims.at(1) * dims.at(2) * sizeof(float) / (1ull << 30);
 
 #define FMT std::setprecision(2) << std::scientific
-  float const nonThreadingTime = copier.NonThreadingCopying(chunks);
-  std::cout << " Classical copying:   " << FMT << nonThreadingTime << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime) << " [GiB/s])\n";
+  std::pair<float,float> const nonThreadingTime = copier.NonThreadingCopying(chunks);
+  std::cout << "[Classical copying        ]  "
+            << "fstream: " << FMT << nonThreadingTime.first  << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime.first)  << " [GiB/s])  |  "
+            << "mmap:    " << FMT << nonThreadingTime.second << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime.second) << " [GiB/s])\n";
 
-  float const manualTime = copier.ManuallyOverlappingCopying(chunks);
-  std::cout << " Manual overlap copy: " << FMT <<       manualTime << " [s] (~ " << FMT << (sizeGiB / manualTime)       << " [GiB/s])\n";
+  std::pair<float, float> const manualTime = copier.ManuallyOverlappingCopying(chunks);
+  std::cout << "[Manual overlap copy      ]  "
+            << "fstream: " << FMT << manualTime.first  << " [s] (~ " << FMT << (sizeGiB / manualTime.first)  << " [GiB/s])  |  "
+            << "mmap:    " << FMT << manualTime.second << " [s] (~ " << FMT << (sizeGiB / manualTime.second) << " [GiB/s])\n";
 
-  float const threadingTime = copier.ThreadingCopying(chunks);
-  std::cout << " Threaded  copying:   " << FMT <<    threadingTime << " [s] (~ " << FMT << (sizeGiB / threadingTime)    << " [GiB/s])\n";
+  std::pair<float, float> const threadingTime = copier.ThreadingCopying(chunks);
+  std::cout << "[Threaded  copying        ]  "
+            << "fstream: " << FMT << threadingTime.first  << " [s] (~ " << FMT << (sizeGiB / threadingTime.first)  << " [GiB/s])  |  "
+            << "mmap:    " << FMT << threadingTime.second << " [s] (~ " << FMT << (sizeGiB / threadingTime.second) << " [GiB/s])\n";
+
+  std::pair<float, float> const threadingTime2 = copier.ThreadedWriteCopying(chunks);
+  std::cout << "[Threaded write copying   ]  "
+            << "fstream: " << FMT << threadingTime2.first  << " [s] (~ " << FMT << (sizeGiB / threadingTime2.first)  << " [GiB/s])  |  "
+            << "mmap:    " << FMT << threadingTime2.second << " [s] (~ " << FMT << (sizeGiB / threadingTime2.second) << " [GiB/s])\n";
 #undef FMT
 }
 
@@ -533,8 +544,8 @@ int main(int argc, char** argv) {
     std::cerr << "    (1) Extracts  <number-full-slices>  full slices from the file.\n";
     std::cerr << "    (2) Extracts  <number-cubic-rois>  of sizes KxKxK (K = 3,5,7,9) from the file.\n\n";
     std::cerr << "  <path/to/inputfile.mhd>  Path to an existing mhd file (3D, metadata, pointing to a .raw file). MUST be uint16.\n";
-    std::cerr << "  <number-full-slices>     Number of full slices to extract/store. Must be > 0.\n";
-    std::cerr << "  <number-cubic-rois>      Number of cubic RoIs to extract/store. Must be > 0.\n";
+    std::cerr << "  <number-full-slices>     Number of full slices to extract/store. Must be >= 0. No region benchmark if any of both is zero.\n";
+    std::cerr << "  <number-cubic-rois>      Number of cubic RoIs to extract/store. Must be >= 0. No region benchmark if any of both is zero.\n";
     return EXIT_FAILURE;
   }
 
@@ -544,8 +555,13 @@ int main(int argc, char** argv) {
     return value;
   };
 
-  RunBenchmarks(argv[1], parseInt(argv[2]), parseInt(argv[3]));
-  std::cout << std::string(80, '=') << '\n';
+  int fullSlices = parseInt(argv[2]);
+  int regions    = parseInt(argv[3]);
+
+  if (fullSlices > 0 && regions > 0) {
+    RunBenchmarks(argv[1], fullSlices, regions);
+    std::cout << std::string(80, '=') << '\n';
+  }
   BenchmarkQueuedCopying(argv[1]);
   return EXIT_SUCCESS;
 }
