@@ -1,4 +1,4 @@
-/*
+﻿/*
 * MIT License
 * 
 * Copyright (c) 2024 Dr. Thomas Lang
@@ -24,6 +24,7 @@
 #include "ChunkedCopier.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <numeric>
