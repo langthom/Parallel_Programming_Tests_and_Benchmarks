@@ -55,19 +55,21 @@ std::unique_ptr< unsigned short[] > GetData(double memInGiB, long long& N) {
   return data;
 }
 
-
+#define METHOD1 "serial"
 void Copy1(float* target, unsigned short* source, long long N) {
   for (long long i = 0; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
 }
 
+#define METHOD2 "serial                                + restrict"
 void Copy2(float* __restrict target, unsigned short* __restrict source, long long N) {
   for (long long i = 0; i < N; ++i) {
     target[i] = static_cast< float >(source[i]);
   }
 }
 
+#define METHOD3 "                  parallel"
 void Copy3(float* target, unsigned short* source, long long N) {
   #pragma omp parallel
   for (long long i = 0; i < N; ++i) {
@@ -75,6 +77,7 @@ void Copy3(float* target, unsigned short* source, long long N) {
   }
 }
 
+#define METHOD4 "                  parallel            + restrict"
 void Copy4(float* __restrict target, unsigned short* __restrict source, long long N) {
   #pragma omp parallel
   for (long long i = 0; i < N; ++i) {
@@ -82,6 +85,7 @@ void Copy4(float* __restrict target, unsigned short* __restrict source, long lon
   }
 }
 
+#define METHOD5 "serial          + unrolled"
 void Copy5(float* target, unsigned short* source, long long N) {
   long long i = 0;
   for (; i < N; i += 8) {
@@ -100,6 +104,7 @@ void Copy5(float* target, unsigned short* source, long long N) {
   }
 }
 
+#define METHOD6 "serial          + unrolled            + restrict"
 void Copy6(float* __restrict target, unsigned short* __restrict source, long long N) {
   long long i = 0;
   for (; i < N; i += 8) {
@@ -118,11 +123,18 @@ void Copy6(float* __restrict target, unsigned short* __restrict source, long lon
   }
 }
 
+#define METHOD7 "std::transform"
 void Copy7(float* target, unsigned short* source, long long N) {
   std::transform(source, source + N, target, [](unsigned short x) {return static_cast< float >(x); });
 }
 
-void Copy8(float* target, unsigned short* source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
+#define METHOD8 "CUDA"
+void Copy8(float* __restrict target, unsigned short* __restrict source, long long N) {
+  cudaRawArrayConversion(target, source, N);
+}
+
+#define METHOD9 "vectorized(8)"
+void Copy9(float* target, unsigned short* source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
   long long i = 0;
   for (; i < N; i += 8) {
     //  Load 8 16-bit ushorts.
@@ -149,34 +161,36 @@ void Copy8(float* target, unsigned short* source, long long N) { // taken from h
   }
 }
 
-void Copy9(float* __restrict target, unsigned short* __restrict source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
-  long long i = 0;
-  for (; i < N; i += 8) {
-    //  Load 8 16-bit ushorts.
-    //  vi = {a,b,c,d,e,f,g,h}
-    __m128i vi = _mm_load_si128((const __m128i*)(source + i));
-
-    //  Convert to 32-bit integers
-    //  vi0 = {a,0,b,0,c,0,d,0}
-    //  vi1 = {e,0,f,0,g,0,h,0}
-    __m128i vi0 = _mm_cvtepu16_epi32(vi);
-    __m128i vi1 = _mm_cvtepu16_epi32(_mm_unpackhi_epi64(vi,vi));
-
-    //  Convert to float
-    __m128 vf0 = _mm_cvtepi32_ps(vi0);
-    __m128 vf1 = _mm_cvtepi32_ps(vi1);
-
-    //  Store
-    _mm_store_ps(target + i + 0,vf0);
-    _mm_store_ps(target + i + 4,vf1);
-  }
-  i -= 8;
-  for (; i < N; ++i) {
-    target[i] = static_cast< float >(source[i]);
-  }
-}
-
+#define METHOD10 "vectorized(8)                        + restrict"
 void Copy10(float* __restrict target, unsigned short* __restrict source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
+  long long i = 0;
+  for (; i < N; i += 8) {
+    //  Load 8 16-bit ushorts.
+    //  vi = {a,b,c,d,e,f,g,h}
+    __m128i vi = _mm_load_si128((const __m128i*)(source + i));
+
+    //  Convert to 32-bit integers
+    //  vi0 = {a,0,b,0,c,0,d,0}
+    //  vi1 = {e,0,f,0,g,0,h,0}
+    __m128i vi0 = _mm_cvtepu16_epi32(vi);
+    __m128i vi1 = _mm_cvtepu16_epi32(_mm_unpackhi_epi64(vi,vi));
+
+    //  Convert to float
+    __m128 vf0 = _mm_cvtepi32_ps(vi0);
+    __m128 vf1 = _mm_cvtepi32_ps(vi1);
+
+    //  Store
+    _mm_store_ps(target + i + 0,vf0);
+    _mm_store_ps(target + i + 4,vf1);
+  }
+  i -= 8;
+  for (; i < N; ++i) {
+    target[i] = static_cast< float >(source[i]);
+  }
+}
+
+#define METHOD11 "vectorized(8)  + unrolled            + restrict"
+void Copy11(float* __restrict target, unsigned short* __restrict source, long long N) { // taken from https://stackoverflow.com/a/16035571/10696884
   long long i = 0;
   for (; i < N; i += 16) {
     // Load 128 bit integer data (-> 128 bit == 8x unsigned short)
@@ -219,10 +233,7 @@ void Copy10(float* __restrict target, unsigned short* __restrict source, long lo
   }
 }
 
-void Copy11(float* __restrict target, unsigned short* __restrict source, long long N) {
-  cudaRawArrayConversion(target, source, N);
-}
-
+#define METHOD12 "vectorized(8)  + parallel"
 void Copy12(float* target, unsigned short* source, long long N) {
   #pragma omp parallel for
   for (long long i = 0; i < N; i += 8) {
@@ -242,8 +253,9 @@ void Copy12(float* target, unsigned short* source, long long N) {
   }
 }
 
+#define METHOD13 "vectorized(8)  + parallel            + restrict"
 void Copy13(float* __restrict target, unsigned short* __restrict source, long long N) {
-#pragma omp parallel for
+  #pragma omp parallel for
   for (long long i = 0; i < N; i += 8) {
     __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
     __m128i b0 = _mm_unpackhi_epi64(a0, a0);
@@ -261,6 +273,7 @@ void Copy13(float* __restrict target, unsigned short* __restrict source, long lo
   }
 }
 
+#define METHOD14 "vectorized(8)  + parallel + unrolled"
 void Copy14(float* target, unsigned short* source, long long N) {
 
   #pragma omp parallel for
@@ -297,6 +310,7 @@ void Copy14(float* target, unsigned short* source, long long N) {
   }
 }
 
+#define METHOD15 "vectorized(8)  + parallel + unrolled + restrict"
 void Copy15(float* __restrict target, unsigned short* __restrict source, long long N) {
 
   #pragma omp parallel for
@@ -334,6 +348,112 @@ void Copy15(float* __restrict target, unsigned short* __restrict source, long lo
 }
 
 
+// like Copy12 (seems best) but with different OpenMP schedules
+
+#define METHOD16 "vectorized(8)  + parallel + schedule(static)"
+void Copy16(float* target, unsigned short* source, long long N) {
+  #pragma omp parallel for schedule(static)
+  for (long long i = 0; i < N; i += 8) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+  }
+
+  long long rem = (N / 8) * 8;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+#define METHOD17 "vectorized(8)  + parallel + schedule(static,1)"
+void Copy17(float* target, unsigned short* source, long long N) {
+  #pragma omp parallel for schedule(static,1)
+  for (long long i = 0; i < N; i += 8) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+  }
+
+  long long rem = (N / 8) * 8;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+#define METHOD18 "vectorized(8)  + parallel + schedule(static,N/8)"
+void Copy18(float* target, unsigned short* source, long long N) {
+  #pragma omp parallel for schedule(static,N/8)
+  for (long long i = 0; i < N; i += 8) {
+    __m128i a0 = _mm_load_si128((const __m128i*)(source + i + 0));
+    __m128i b0 = _mm_unpackhi_epi64(a0, a0);
+    a0 = _mm_cvtepu16_epi32(a0);
+    b0 = _mm_cvtepu16_epi32(b0);
+    __m128 c0 = _mm_cvtepi32_ps(a0);
+    __m128 d0 = _mm_cvtepi32_ps(b0);
+    _mm_store_ps(target + i + 0, c0);
+    _mm_store_ps(target + i + 4, d0);
+  }
+
+  long long rem = (N / 8) * 8;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+#define METHOD19 "vectorized(16) + parallel + schedule(static)"
+void Copy19(float* target, unsigned short* source, long long N) {
+  // 16x unsigned short = 256 bits
+  #pragma omp parallel for schedule(static)
+  for (long long i = 0; i < N; i += 16) {
+    // Load 16 consecutive uint16_t values (32 bytes) into a single __m256i register
+    __m256i v_shorts = _mm256_loadu_si256((const __m256i*)(source + i));
+
+    // --- Step 1: Separate the 16 shorts into two 128-bit chunks (low 8 and high 8) ---
+    // This is necessary because the widening intrinsic only takes a 128-bit source.
+    __m128i v_low_shorts  = _mm256_extracti128_si256(v_shorts, 0); // Low 8 shorts
+    __m128i v_high_shorts = _mm256_extracti128_si256(v_shorts, 1); // High 8 shorts
+
+    // --- Step 2: Widen the 16-bit unsigned integers to 32-bit signed integers (epi32) ---
+    // The intrinsic `_mm256_cvtepu16_epi32` takes a __m128i (8x u16) and produces a __m256i (8x u32).
+    // It correctly handles the unsigned nature of the source data during widening.
+
+    // Convert low 8 shorts to 8 DWORDS
+    __m256i v_low_int  = _mm256_cvtepu16_epi32(v_low_shorts);
+
+    // Convert high 8 shorts to 8 DWORDS
+    __m256i v_high_int = _mm256_cvtepu16_epi32(v_high_shorts);
+
+    // --- Step 3: Convert the 32-bit integers (DWORDS) to 32-bit floats (PS) ---
+    // This is the standard conversion intrinsic.
+
+    // Convert 8 DWORDS (low set) to 8 floats
+    __m256 v_low_float  = _mm256_cvtepi32_ps(v_low_int);
+
+    // Convert 8 DWORDS (high set) to 8 floats
+    __m256 v_high_float = _mm256_cvtepi32_ps(v_high_int);
+
+    // --- Step 4: Store the results ---
+    _mm256_storeu_ps(target + i + 0, v_low_float);
+    _mm256_storeu_ps(target + i + 8, v_high_float);  
+  }
+
+  long long rem = (N / 16) * 16;
+  for (; rem < N; ++rem) {
+    target[rem] = static_cast<float>(source[rem]);
+  }
+}
+
+
 
 // Preprocessor solutions to allow for different function parameter list qualifiers (restricted) without implicit decay or so.
 
@@ -347,6 +467,8 @@ bool isNear(float* expected, float* got, long long N, double tol) {
 }
 
 #define FLOAT_FMT std::setw(4) << std::setprecision(2) << std::scientific
+
+#define METHOD(i) METHOD ## i
 
 #define ELAPSED_S(i) double elapsed ## i; do { \
   auto start = std::chrono::high_resolution_clock::now(); \
@@ -375,7 +497,7 @@ bool isNear(float* expected, float* got, long long N, double tol) {
     std /= (M-1); \
   } \
   double gbps = sizeGB / avg; \
-  std::cout << "  - Method " << std::setw(2) << i << ":  " << FLOAT_FMT << avg << " +/- " << FLOAT_FMT << std << " [s] (~ " << gbps << " [GB/s])\n"; \
+  std::cout << " #" << std::setw(2) << std::right << i << " [" << std::setw(48) << std::left << METHOD(i) << "]  " << FLOAT_FMT << avg << " +/- " << FLOAT_FMT << std << " [s] (~ " << gbps << " [GB/s])\n"; \
   avgs.push_back(avg); \
 } while(false);
 
@@ -417,6 +539,7 @@ int main(int argc, char** argv) {
     float* dataOut = dataOutSP.get();
 
     std::vector<double> avgs;
+    avgs.reserve(20);
 
     BENCHMARK( 1, nRuns);
     BENCHMARK( 2, nRuns);
@@ -425,24 +548,27 @@ int main(int argc, char** argv) {
     BENCHMARK( 5, nRuns);
     BENCHMARK( 6, nRuns);
     BENCHMARK( 7, nRuns);
-    BENCHMARK( 8, nRuns);
-    BENCHMARK( 9, nRuns);
-    BENCHMARK(10, nRuns);
     if (disableGPU) {
-      std::cout << "  - Method 11:  disabled\n";
+      std::cout << " # 8 [CUDA                                            ]  disabled\n";
       avgs.push_back(std::numeric_limits<double>::max());
     } else {
-      BENCHMARK(11, nRuns);
+      BENCHMARK(8, nRuns);
     }
+    BENCHMARK( 9, nRuns);
+    BENCHMARK(10, nRuns);
+    BENCHMARK(11, nRuns);
     BENCHMARK(12, nRuns);
     BENCHMARK(13, nRuns);
     BENCHMARK(14, nRuns);
     BENCHMARK(15, nRuns);
+    BENCHMARK(16, nRuns);
+    BENCHMARK(17, nRuns);
+    BENCHMARK(18, nRuns);
+    BENCHMARK(19, nRuns);
 
     int bestMethod = static_cast< int >(std::distance(avgs.begin(), std::min_element(avgs.begin(), avgs.end()))+1/*offset in indexing*/);
     std::cout << "  => Best method: " << bestMethod << "\n\n";
   }
-
 
   return EXIT_SUCCESS;
 }
