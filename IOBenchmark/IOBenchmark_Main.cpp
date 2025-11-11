@@ -491,7 +491,7 @@ void BenchmarkQueuedCopying(std::string const& mhdFile)
     targetFile.put('\0');
   }
 
-  size_t const numSlices = 32;
+  size_t const numSlices = 128;
   size_t const nTiles    = (dims.at(2) + numSlices - 1) / numSlices;
   size_t const sliceSize = dims.at(0) * dims.at(1);
 
@@ -511,26 +511,104 @@ void BenchmarkQueuedCopying(std::string const& mhdFile)
   float const sizeGiB = dims.at(0) * dims.at(1) * dims.at(2) * sizeof(float) / (1ull << 30);
 
 #define FMT std::setprecision(2) << std::scientific
-  std::pair<float,float> const nonThreadingTime = copier.NonThreadingCopying(chunks);
-  std::cout << "[Classical copying        ]  "
-            << "fstream: " << FMT << nonThreadingTime.first  << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime.first)  << " [GiB/s])  |  "
-            << "mmap:    " << FMT << nonThreadingTime.second << " [s] (~ " << FMT << (sizeGiB / nonThreadingTime.second) << " [GiB/s])\n";
+  io::QueueChunkedCopier::Timings const nonThreadingTime = copier.NonThreadingCopying(chunks);
+  io::QueueChunkedCopier::Timings const manualTime       = copier.ManuallyOverlappingCopying(chunks);
+  io::QueueChunkedCopier::Timings const threadingTime    = copier.ThreadingCopying(chunks);
+  io::QueueChunkedCopier::Timings const threadingTime2   = copier.ThreadedWriteCopying(chunks);
 
-  std::pair<float, float> const manualTime = copier.ManuallyOverlappingCopying(chunks);
-  std::cout << "[Manual overlap copy      ]  "
-            << "fstream: " << FMT << manualTime.first  << " [s] (~ " << FMT << (sizeGiB / manualTime.first)  << " [GiB/s])  |  "
-            << "mmap:    " << FMT << manualTime.second << " [s] (~ " << FMT << (sizeGiB / manualTime.second) << " [GiB/s])\n";
+  std::vector<io::QueueChunkedCopier::Timings> const allTimings{nonThreadingTime, manualTime, threadingTime, threadingTime2};
 
-  std::pair<float, float> const threadingTime = copier.ThreadingCopying(chunks);
-  std::cout << "[Threaded  copying        ]  "
-            << "fstream: " << FMT << threadingTime.first  << " [s] (~ " << FMT << (sizeGiB / threadingTime.first)  << " [GiB/s])  |  "
-            << "mmap:    " << FMT << threadingTime.second << " [s] (~ " << FMT << (sizeGiB / threadingTime.second) << " [GiB/s])\n";
+  std::vector<char const*> methodNames{
+    "[Classical copying        ]  ",
+    "[Manual overlap copy      ]  ",
+    "[Threaded  copying        ]  ",
+    "[Threaded write copying   ]  ",
+  };
 
-  std::pair<float, float> const threadingTime2 = copier.ThreadedWriteCopying(chunks);
-  std::cout << "[Threaded write copying   ]  "
-            << "fstream: " << FMT << threadingTime2.first  << " [s] (~ " << FMT << (sizeGiB / threadingTime2.first)  << " [GiB/s])  |  "
-            << "mmap:    " << FMT << threadingTime2.second << " [s] (~ " << FMT << (sizeGiB / threadingTime2.second) << " [GiB/s])\n";
-#undef FMT
+  std::vector<char const*> impls{
+    "fstream: ",
+    "mmap:    ",
+    "syscall: ",
+  };
+
+  for (int i = 0; i < methodNames.size(); ++i) {
+    std::cout << methodNames[i];
+    auto const& timings = allTimings[i];
+
+    for (int j = 0; j < impls.size(); ++j) {
+      if (j > 0) std::cout << "  |  ";
+      std::cout << impls[j] << FMT << timings[j] << " [s] (~ " << FMT << (sizeGiB / timings[j]) << " [GiB/s])";
+    }
+    std::cout << '\n';
+  }
+}
+
+void MeasureReadVsWrite(std::string const& inputMhd, std::string const& outputMhd) {
+  auto const [dims, rawFile] = ParseMhd(inputMhd);
+
+  // Initialize the target file.
+  {
+    auto size = std::filesystem::file_size(rawFile);
+    std::ofstream targetFile{outputMhd.c_str(), std::ios::binary};
+    targetFile.seekp(size - 1, std::ios::cur);
+    targetFile.put('\0');
+  }
+
+  std::ifstream inStream{inputMhd.c_str(), std::ios::binary};
+  std::ofstream outStream{outputMhd.c_str(), std::ios::binary};
+
+  size_t const sliceSize = dims[0] * dims[1];
+
+  int runs = 5;
+  std::vector<double> percentages{0.0625, 0.125, 0.250, 0.500, 1.000};
+  std::vector<double> slowness;
+  slowness.reserve(percentages.size());
+
+  double progStep = 1. / (percentages.size() * runs);
+  double prog = 0.0;
+
+  for (double percentage : percentages) {
+    size_t const z = static_cast< size_t >(dims[2] * percentage);
+    size_t const zBuf = z * sliceSize;
+    size_t const zByt = zBuf * sizeof(unsigned short);
+    auto buf = std::make_unique<unsigned short[]>(zBuf);
+
+    for (int run = 0; run < runs; ++run) {
+      inStream.seekg(0, std::ios::beg);
+      auto readStart = std::chrono::high_resolution_clock::now();
+      inStream.read(reinterpret_cast< char* >(buf.get()), zByt);
+      auto readEnd = std::chrono::high_resolution_clock::now();
+      double const readSecs = std::chrono::duration<double>(readEnd - readStart).count();
+
+      outStream.seekp(0, std::ios::beg);
+      auto writeStart = std::chrono::high_resolution_clock::now();
+      outStream.write(reinterpret_cast< char* >(buf.get()), zByt);
+      auto writeEnd = std::chrono::high_resolution_clock::now();
+      double const writeSecs = std::chrono::duration<double>(writeEnd - writeStart).count();
+
+      slowness.push_back(writeSecs / readSecs);
+
+      prog += progStep;
+      std::cout << "Progress: " << std::setw(3) << static_cast< int >(prog * 100.0) << "%\r";
+    }
+  }
+
+  inStream.close();
+  outStream.close();
+
+  double avg = 0.0, std = 0.0;
+  for (double s : slowness) avg += s; avg /= slowness.size();
+  for (double s : slowness) std += std::pow(s - avg, 2); if (slowness.size() > 1) std /= (slowness.size() - 1);
+  std = std::sqrt(std);
+
+#define FMT std::setprecision(1) << std::scientific
+  std::cout << "Measuring how much slower a write is compared to a read (increasing memory size):\n";
+  for (int i = 0; i < slowness.size(); ++i) {
+    std::cout << "   o Trial " << std::setw(2) << i << ": " << FMT << slowness[i] << " x\n";
+  }
+  std::cout << "  Statistically: " << FMT << avg << " +/- " << FMT << std << " x\n";
+
+  std::filesystem::remove(outputMhd);
 }
 
 
@@ -562,6 +640,9 @@ int main(int argc, char** argv) {
     RunBenchmarks(argv[1], fullSlices, regions);
     std::cout << std::string(80, '=') << '\n';
   }
-  BenchmarkQueuedCopying(argv[1]);
+
+  std::string const inMhd = argv[1];
+  //MeasureReadVsWrite(inMhd, inMhd.substr(0, inMhd.length() - 4) + "_out.raw");
+  BenchmarkQueuedCopying(inMhd);
   return EXIT_SUCCESS;
 }

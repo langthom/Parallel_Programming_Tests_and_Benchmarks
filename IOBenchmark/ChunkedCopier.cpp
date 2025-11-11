@@ -36,9 +36,18 @@
 
 #include "mio.hpp"
 
+#include <fcntl.h> // open flags
+#include <io.h>
+
+
+enum class IOMethod {
+  FSTREAM, MMAP, SYSCALL
+};
+
 namespace io::impl
 {
-  template<bool UseMappedMemory=false>
+
+  template<IOMethod Method>
   class IOTask
   {
   public:
@@ -56,31 +65,45 @@ namespace io::impl
       size_t const chunkSizeBytes = this->ChunkSize * sizeof(unsigned short);
 
       if (read) {
-        this->Chunk = std::make_unique<float[]>(this->ChunkSize);
+        this->Chunk = std::make_unique<unsigned short[]>(this->ChunkSize);
 
-        if constexpr (UseMappedMemory) {
+        if constexpr (Method == IOMethod::MMAP) {
           mio::mmap_source mappedFile(filename, offsetBytes, chunkSizeBytes);
           std::copy_n(reinterpret_cast<unsigned short const*>(mappedFile.data()), this->ChunkSize, this->Chunk.get());
-        } else {
+        } else if constexpr(Method == IOMethod::FSTREAM) {
           std::ifstream mappedFile(filename, std::ios::binary);
           mappedFile.seekg(offsetBytes);
           mappedFile.read(reinterpret_cast<char*>(this->Chunk.get()), chunkSizeBytes);
+        } else if constexpr (Method == IOMethod::SYSCALL) {
+          int fId = open(filename.c_str(), O_RDONLY | O_BINARY);
+          if (fId != -1) {
+            _lseeki64(fId, offsetBytes, SEEK_SET);
+            _read(fId, this->Chunk.get(), chunkSizeBytes);
+          }
+          _close(fId);
         }
       } else {
-        if constexpr (UseMappedMemory) {
+        if constexpr (Method == IOMethod::MMAP) {
           mio::mmap_sink mappedFile(filename, offsetBytes, chunkSizeBytes);
           std::copy_n(this->Chunk.get(), this->ChunkSize, reinterpret_cast<unsigned short*>(mappedFile.data()));
-        } else {
+        } else if constexpr(Method == IOMethod::FSTREAM) {
           std::fstream mappedFile(filename, std::ios::binary | std::ios::in | std::ios::out);
           mappedFile.seekp(offsetBytes);
           mappedFile.write(reinterpret_cast<char*>(this->Chunk.get()), chunkSizeBytes);
+        } else if constexpr (Method == IOMethod::SYSCALL) {
+          int fId = open(filename.c_str(), O_BINARY | O_WRONLY);
+          if (fId != -1) {
+            _lseeki64(fId, offsetBytes, SEEK_SET);
+            _write(fId, this->Chunk.get(), chunkSizeBytes);
+          }
+          _close(fId);
         }
       }
     }
 
   private:
     size_t Offset, ChunkSize;
-    std::shared_ptr< float[] > Chunk;
+    std::shared_ptr< unsigned short[] > Chunk;
   };
 
   // -------------------------------------------------------------------------------- //
@@ -122,11 +145,11 @@ namespace io::impl
     std::queue<T> Items;
   };
 
-  template<bool UseMappedMemory>
-  static ThreadSafeQueue< IOTask<UseMappedMemory> > ReadQueue;
+  template<IOMethod Method>
+  static ThreadSafeQueue< IOTask<Method> > ReadQueue;
 
-  template<bool UseMappedMemory>
-  static ThreadSafeQueue< IOTask<UseMappedMemory> > WriteQueue;
+  template<IOMethod Method>
+  static ThreadSafeQueue< IOTask<Method> > WriteQueue;
 
 
 
@@ -134,19 +157,19 @@ namespace io::impl
     READ, WRITE
   };
 
-  template<IOMode Mode, bool UseMappedMemory>
+  template<IOMode Mode, IOMethod Method>
   void ChunkReaderThread(std::atomic_bool& keepRunning, std::string const& inputFilename)
   {
     static constexpr bool isRead = Mode == IOMode::READ;
-    auto& Data = isRead ? ReadQueue<UseMappedMemory> : WriteQueue<UseMappedMemory>;
+    auto& Data = isRead ? ReadQueue<Method> : WriteQueue<Method>;
 
     while (keepRunning || Data.HasTasks()) {
-      IOTask<UseMappedMemory> task = Data.Pop();
+      IOTask<Method> task = Data.Pop();
 
       task.Execute(inputFilename, isRead);
 
       if constexpr (isRead) {
-        WriteQueue<UseMappedMemory>.Push(std::move(task));
+        WriteQueue<Method>.Push(std::move(task));
       }
     }
   }
@@ -160,12 +183,12 @@ void io::QueueChunkedCopier::SetParameters(std::string const& inputFilename, std
 }
 
 
-std::pair<float, float> io::QueueChunkedCopier::NonThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
+io::QueueChunkedCopier::Timings io::QueueChunkedCopier::NonThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
 {
   auto start1 = std::chrono::high_resolution_clock::now();
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::IOTask<false> task{offset, chunkSize};
+    impl::IOTask<IOMethod::FSTREAM> task{offset, chunkSize};
     task.Execute(this->InputFilename,  true);
     task.Execute(this->OutputFilename, false);
   }
@@ -176,24 +199,35 @@ std::pair<float, float> io::QueueChunkedCopier::NonThreadingCopying(std::vector<
   auto start2 = std::chrono::high_resolution_clock::now();
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::IOTask<true> task{offset, chunkSize};
+    impl::IOTask<IOMethod::MMAP> task{offset, chunkSize};
     task.Execute(this->InputFilename,  true);
     task.Execute(this->OutputFilename, false);
   }
 
   auto end2 = std::chrono::high_resolution_clock::now();
   float dur2 = std::chrono::duration< float >(end2 - start2).count();
-  return std::make_pair(dur1, dur2);
+
+  auto start3 = std::chrono::high_resolution_clock::now();
+
+  for (auto const& [offset, chunkSize] : chunks) {
+    impl::IOTask<IOMethod::SYSCALL> task{offset, chunkSize};
+    task.Execute(this->InputFilename,  true);
+    task.Execute(this->OutputFilename, false);
+  }
+
+  auto end3 = std::chrono::high_resolution_clock::now();
+  float dur3 = std::chrono::duration< float >(end3 - start3).count();
+  return {dur1, dur2, dur3};
 }
 
 
-std::pair<float, float> io::QueueChunkedCopier::ManuallyOverlappingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
+io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
 {
   auto start1 = std::chrono::high_resolution_clock::now();
 
   size_t const numChunks = chunks.size();
   auto const [off0, cs0] = chunks[0];
-  impl::IOTask<false> inTask{off0, cs0}, outTask{off0, cs0};
+  impl::IOTask<IOMethod::FSTREAM> inTask{off0, cs0}, outTask{off0, cs0};
 
   for (int i = 0; i <= numChunks; ++i) {
     #pragma omp parallel sections
@@ -203,7 +237,7 @@ std::pair<float, float> io::QueueChunkedCopier::ManuallyOverlappingCopying(std::
         // Input
         if (i < numChunks) {
           auto const [off, cs] = chunks[i];
-          inTask = impl::IOTask<false>{off, cs};
+          inTask = impl::IOTask<IOMethod::FSTREAM>{off, cs};
           inTask.Execute(this->InputFilename, true);
         }
       }
@@ -226,7 +260,7 @@ std::pair<float, float> io::QueueChunkedCopier::ManuallyOverlappingCopying(std::
 
   auto start2 = std::chrono::high_resolution_clock::now();
 
-  impl::IOTask<true> inTask2{off0, cs0}, outTask2{off0, cs0};
+  impl::IOTask<IOMethod::MMAP> inTask2{off0, cs0}, outTask2{off0, cs0};
 
   for (int i = 0; i <= numChunks; ++i) {
     #pragma omp parallel sections
@@ -236,7 +270,7 @@ std::pair<float, float> io::QueueChunkedCopier::ManuallyOverlappingCopying(std::
         // Input
         if (i < numChunks) {
           auto const [off, cs] = chunks[i];
-          inTask2 = impl::IOTask<true>{off, cs};
+          inTask2 = impl::IOTask<IOMethod::MMAP>{off, cs};
           inTask2.Execute(this->InputFilename, true);
         }
       }
@@ -255,21 +289,54 @@ std::pair<float, float> io::QueueChunkedCopier::ManuallyOverlappingCopying(std::
 
   auto end2 = std::chrono::high_resolution_clock::now();
   float dur2 = std::chrono::duration< float >(end2 - start2).count();
-  return std::make_pair(dur1, dur2);
+
+  auto start3 = std::chrono::high_resolution_clock::now();
+
+  impl::IOTask<IOMethod::SYSCALL> inTask3{off0, cs0}, outTask3{off0, cs0};
+
+  for (int i = 0; i <= numChunks; ++i) {
+    #pragma omp parallel sections
+    {
+      #pragma omp section
+      {
+        // Input
+        if (i < numChunks) {
+          auto const [off, cs] = chunks[i];
+          inTask3 = impl::IOTask<IOMethod::SYSCALL>{off, cs};
+          inTask3.Execute(this->InputFilename, true);
+        }
+      }
+
+      #pragma omp section
+      {
+        // Output
+        if (i > 0) {
+          outTask3.Execute(this->OutputFilename, false);
+        }
+      }
+    }
+
+    std::swap(inTask3, outTask3);
+  }
+
+  auto end3 = std::chrono::high_resolution_clock::now();
+  float dur3 = std::chrono::duration< float >(end3 - start3).count();
+
+  return {dur1, dur2, dur3};
 }
 
 
-std::pair<float, float> io::QueueChunkedCopier::ThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
+io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
 {
   auto start1 = std::chrono::high_resolution_clock::now();
 
   std::atomic_bool keepReading = true;
   std::atomic_bool keepWriting = true;
-  std::thread  readThread(impl::ChunkReaderThread<impl::IOMode::READ, false>, std::ref(keepReading), this->InputFilename);
-  std::thread writeThread(impl::ChunkReaderThread<impl::IOMode::WRITE,false>, std::ref(keepWriting), this->OutputFilename);
+  std::thread  readThread(impl::ChunkReaderThread<impl::IOMode::READ, IOMethod::FSTREAM>, std::ref(keepReading), this->InputFilename);
+  std::thread writeThread(impl::ChunkReaderThread<impl::IOMode::WRITE,IOMethod::FSTREAM>, std::ref(keepWriting), this->OutputFilename);
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::ReadQueue<false>.Push({offset, chunkSize});
+    impl::ReadQueue<IOMethod::FSTREAM>.Push({offset, chunkSize});
   }
 
   // First wait for the reading thread to finish, subsequently for the writing thread.
@@ -284,11 +351,11 @@ std::pair<float, float> io::QueueChunkedCopier::ThreadingCopying(std::vector<std
 
   keepReading = true;
   keepWriting = true;
-  std::thread  readThread2(impl::ChunkReaderThread<impl::IOMode::READ, true>, std::ref(keepReading), this->InputFilename);
-  std::thread writeThread2(impl::ChunkReaderThread<impl::IOMode::WRITE,true>, std::ref(keepWriting), this->OutputFilename);
+  std::thread  readThread2(impl::ChunkReaderThread<impl::IOMode::READ, IOMethod::MMAP>, std::ref(keepReading), this->InputFilename);
+  std::thread writeThread2(impl::ChunkReaderThread<impl::IOMode::WRITE,IOMethod::MMAP>, std::ref(keepWriting), this->OutputFilename);
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::ReadQueue<true>.Push({offset, chunkSize});
+    impl::ReadQueue<IOMethod::MMAP>.Push({offset, chunkSize});
   }
 
   // First wait for the reading thread to finish, subsequently for the writing thread.
@@ -297,19 +364,39 @@ std::pair<float, float> io::QueueChunkedCopier::ThreadingCopying(std::vector<std
 
   auto end2 = std::chrono::high_resolution_clock::now();
   float dur2 = std::chrono::duration< float >(end2 - start2).count();
-  return std::make_pair(dur1, dur2);
+
+  // ---------------------
+  auto start3 = std::chrono::high_resolution_clock::now();
+
+  keepReading = true;
+  keepWriting = true;
+  std::thread  readThread3(impl::ChunkReaderThread<impl::IOMode::READ, IOMethod::SYSCALL>, std::ref(keepReading), this->InputFilename);
+  std::thread writeThread3(impl::ChunkReaderThread<impl::IOMode::WRITE,IOMethod::SYSCALL>, std::ref(keepWriting), this->OutputFilename);
+
+  for (auto const& [offset, chunkSize] : chunks) {
+    impl::ReadQueue<IOMethod::SYSCALL>.Push({offset, chunkSize});
+  }
+
+  // First wait for the reading thread to finish, subsequently for the writing thread.
+  keepReading = false;  readThread3.join();
+  keepWriting = false; writeThread3.join();
+
+  auto end3 = std::chrono::high_resolution_clock::now();
+  float dur3 = std::chrono::duration< float >(end3 - start3).count();
+
+  return {dur1, dur2, dur3};
 }
 
-std::pair<float, float> io::QueueChunkedCopier::ThreadedWriteCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
+io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ThreadedWriteCopying(std::vector<std::pair<size_t, size_t>> const& chunks)
 {
   auto start1 = std::chrono::high_resolution_clock::now();
   std::vector<std::future<void>> writePromises;
   for (auto const& [offset, chunkSize] : chunks) {
     // Main thread reads (and processes)
-    impl::IOTask<false> task(offset, chunkSize);
+    impl::IOTask<IOMethod::FSTREAM> task(offset, chunkSize);
     task.Execute(this->InputFilename, true);
     // Async writing
-    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<false> task){ task.Execute(this->OutputFilename, false); }, task));
+    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::FSTREAM> task){ task.Execute(this->OutputFilename, false); }, task));
   }
   for (auto& promise : writePromises) {
     promise.get();
@@ -322,15 +409,32 @@ std::pair<float, float> io::QueueChunkedCopier::ThreadedWriteCopying(std::vector
   auto start2 = std::chrono::high_resolution_clock::now();
   for (auto const& [offset, chunkSize] : chunks) {
     // Main thread reads (and processes)
-    impl::IOTask<true> task(offset, chunkSize);
+    impl::IOTask<IOMethod::MMAP> task(offset, chunkSize);
     task.Execute(this->InputFilename, true);
     // Async writing
-    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<true> task) { task.Execute(this->OutputFilename, false); }, task));
+    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::MMAP> task) { task.Execute(this->OutputFilename, false); }, task));
   }
   for (auto& promise : writePromises) {
     promise.get();
   }
   auto end2 = std::chrono::high_resolution_clock::now();
   float dur2 = std::chrono::duration< float >(end2 - start2).count();
-  return std::make_pair(dur1, dur2);
+
+  // --
+  writePromises.clear();
+  auto start3 = std::chrono::high_resolution_clock::now();
+  for (auto const& [offset, chunkSize] : chunks) {
+    // Main thread reads (and processes)
+    impl::IOTask<IOMethod::SYSCALL> task(offset, chunkSize);
+    task.Execute(this->InputFilename, true);
+    // Async writing
+    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::SYSCALL> task) { task.Execute(this->OutputFilename, false); }, task));
+  }
+  for (auto& promise : writePromises) {
+    promise.get();
+  }
+  auto end3 = std::chrono::high_resolution_clock::now();
+  float dur3 = std::chrono::duration< float >(end3 - start3).count();
+
+  return {dur1, dur2, dur3};
 }

@@ -22,6 +22,7 @@
 * SOFTWARE.
 **/
 
+#include <array>
 #include <functional>
 #include <string>
 
@@ -30,15 +31,17 @@ namespace io
   class QueueChunkedCopier
   {
   public:
+    using Timings = std::array<float, 3>;
+
     void SetParameters(std::string const& inputFilename, std::string const& outputFilename, size_t numberOfExecutions);
 
-    std::pair<float, float> NonThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
+    Timings NonThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
 
-    std::pair<float, float> ManuallyOverlappingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
+    Timings ManuallyOverlappingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
 
-    std::pair<float, float> ThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
+    Timings ThreadingCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
 
-    std::pair<float, float> ThreadedWriteCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
+    Timings ThreadedWriteCopying(std::vector<std::pair<size_t, size_t>> const& chunks);
 
   private:
     std::string InputFilename, OutputFilename;
