@@ -543,6 +543,35 @@ void BenchmarkQueuedCopying(std::string const& mhdFile)
   }
 }
 
+
+
+template<io::IOMethod Method>
+void GetAvgIOSpeed(size_t numElements, int numRuns, std::string const& inputFilename, std::string const& outputFilename) {
+  io::IOTask<Method> task(/*offset=*/0, /*size=*/numElements);
+  std::vector<double> writeSlower(numRuns, 0.0);
+
+  for (int run = 0; run < numRuns; ++run) {
+    auto const readStart  = std::chrono::high_resolution_clock::now();
+    task.Execute(inputFilename, true);
+    auto const readEnd    = std::chrono::high_resolution_clock::now();
+    double const readSecs = std::chrono::duration<double>(readEnd - readStart).count();
+
+    auto const writeStart  = std::chrono::high_resolution_clock::now();
+    task.Execute(outputFilename, false);
+    auto const writeEnd    = std::chrono::high_resolution_clock::now();
+    double const writeSecs = std::chrono::duration<double>(writeEnd - writeStart).count();
+
+    // Compute how much slower the write was compared to the read.
+    writeSlower[run] = writeSecs / readSecs;
+  }
+
+  // Compute stats
+  double avg = 0.0, var = 0.0;
+  for (double s : writeSlower) avg += s;                                     avg /= numRuns;
+  for (double s : writeSlower) var += std::pow(s - avg, 2); if (numRuns > 1) var /= numRuns - 1;
+  std::cout << "  [" << io::IOMethodToString<Method>() << "] write is " << std::setprecision(1) << std::scientific << avg << " +/- " << std::setprecision(1) << std::scientific << std::sqrt(var) << " times slower than read\n";
+}
+
 void MeasureReadVsWrite(std::string const& inputMhd, std::string const& outputMhd) {
   auto const [dims, rawFile] = ParseMhd(inputMhd);
 
@@ -554,59 +583,20 @@ void MeasureReadVsWrite(std::string const& inputMhd, std::string const& outputMh
     targetFile.put('\0');
   }
 
-  std::ifstream inStream{inputMhd.c_str(), std::ios::binary};
-  std::ofstream outStream{outputMhd.c_str(), std::ios::binary};
-
   size_t const sliceSize = dims[0] * dims[1];
 
-  int runs = 5;
-  std::vector<double> percentages{0.0625, 0.125, 0.250, 0.500, 1.000};
-  std::vector<double> slowness;
-  slowness.reserve(percentages.size());
-
-  double progStep = 1. / (percentages.size() * runs);
-  double prog = 0.0;
+  int const runs = 1;// 5;
+  std::vector<double> percentages{1.00000, 0.50000, 0.25000, 0.12500, 0.06250, 0.03125};
 
   for (double percentage : percentages) {
-    size_t const z = static_cast< size_t >(dims[2] * percentage);
-    size_t const zBuf = z * sliceSize;
-    size_t const zByt = zBuf * sizeof(unsigned short);
-    auto buf = std::make_unique<unsigned short[]>(zBuf);
-
-    for (int run = 0; run < runs; ++run) {
-      inStream.seekg(0, std::ios::beg);
-      auto readStart = std::chrono::high_resolution_clock::now();
-      inStream.read(reinterpret_cast< char* >(buf.get()), zByt);
-      auto readEnd = std::chrono::high_resolution_clock::now();
-      double const readSecs = std::chrono::duration<double>(readEnd - readStart).count();
-
-      outStream.seekp(0, std::ios::beg);
-      auto writeStart = std::chrono::high_resolution_clock::now();
-      outStream.write(reinterpret_cast< char* >(buf.get()), zByt);
-      auto writeEnd = std::chrono::high_resolution_clock::now();
-      double const writeSecs = std::chrono::duration<double>(writeEnd - writeStart).count();
-
-      slowness.push_back(writeSecs / readSecs);
-
-      prog += progStep;
-      std::cout << "Progress: " << std::setw(3) << static_cast< int >(prog * 100.0) << "%\r";
-    }
+    size_t const z    = static_cast< size_t >(dims[2] * percentage) * sliceSize;
+    double const gigs = static_cast< double >(z * sizeof(unsigned short)) / (1ull << 30);
+    std::cout << "Considering " << std::setprecision(2) << std::scientific << gigs << " [GiB]\n";
+    GetAvgIOSpeed<io::IOMethod::FSTREAM>(z, runs, rawFile, outputMhd);
+    GetAvgIOSpeed<io::IOMethod::MMAP   >(z, runs, rawFile, outputMhd);
+    GetAvgIOSpeed<io::IOMethod::SYSCALL>(z, runs, rawFile, outputMhd);
+    std::cout << '\n';
   }
-
-  inStream.close();
-  outStream.close();
-
-  double avg = 0.0, std = 0.0;
-  for (double s : slowness) avg += s; avg /= slowness.size();
-  for (double s : slowness) std += std::pow(s - avg, 2); if (slowness.size() > 1) std /= (slowness.size() - 1);
-  std = std::sqrt(std);
-
-#define FMT std::setprecision(1) << std::scientific
-  std::cout << "Measuring how much slower a write is compared to a read (increasing memory size):\n";
-  for (int i = 0; i < slowness.size(); ++i) {
-    std::cout << "   o Trial " << std::setw(2) << i << ": " << FMT << slowness[i] << " x\n";
-  }
-  std::cout << "  Statistically: " << FMT << avg << " +/- " << FMT << std << " x\n";
 
   std::filesystem::remove(outputMhd);
 }
@@ -642,7 +632,7 @@ int main(int argc, char** argv) {
   }
 
   std::string const inMhd = argv[1];
-  //MeasureReadVsWrite(inMhd, inMhd.substr(0, inMhd.length() - 4) + "_out.raw");
+  MeasureReadVsWrite(inMhd, inMhd.substr(0, inMhd.length() - 4) + "_out.raw");
   BenchmarkQueuedCopying(inMhd);
   return EXIT_SUCCESS;
 }

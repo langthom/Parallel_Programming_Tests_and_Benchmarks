@@ -26,7 +26,6 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <fstream>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -34,79 +33,10 @@
 #include <queue>
 #include <vector>
 
-#include "mio.hpp"
 
-#include <fcntl.h> // open flags
-#include <io.h>
-
-
-enum class IOMethod {
-  FSTREAM, MMAP, SYSCALL
-};
 
 namespace io::impl
 {
-
-  template<IOMethod Method>
-  class IOTask
-  {
-  public:
-
-    IOTask(size_t offset, size_t chunkSize) noexcept
-      : Offset(offset)
-      , ChunkSize(chunkSize)
-      , Chunk(nullptr)
-    {
-    }
-
-    void Execute(std::string const& filename, bool read)
-    {
-      size_t const offsetBytes    = this->Offset    * sizeof(unsigned short);
-      size_t const chunkSizeBytes = this->ChunkSize * sizeof(unsigned short);
-
-      if (read) {
-        this->Chunk = std::make_unique<unsigned short[]>(this->ChunkSize);
-
-        if constexpr (Method == IOMethod::MMAP) {
-          mio::mmap_source mappedFile(filename, offsetBytes, chunkSizeBytes);
-          std::copy_n(reinterpret_cast<unsigned short const*>(mappedFile.data()), this->ChunkSize, this->Chunk.get());
-        } else if constexpr(Method == IOMethod::FSTREAM) {
-          std::ifstream mappedFile(filename, std::ios::binary);
-          mappedFile.seekg(offsetBytes);
-          mappedFile.read(reinterpret_cast<char*>(this->Chunk.get()), chunkSizeBytes);
-        } else if constexpr (Method == IOMethod::SYSCALL) {
-          int fId = open(filename.c_str(), O_RDONLY | O_BINARY);
-          if (fId != -1) {
-            _lseeki64(fId, offsetBytes, SEEK_SET);
-            _read(fId, this->Chunk.get(), chunkSizeBytes);
-          }
-          _close(fId);
-        }
-      } else {
-        if constexpr (Method == IOMethod::MMAP) {
-          mio::mmap_sink mappedFile(filename, offsetBytes, chunkSizeBytes);
-          std::copy_n(this->Chunk.get(), this->ChunkSize, reinterpret_cast<unsigned short*>(mappedFile.data()));
-        } else if constexpr(Method == IOMethod::FSTREAM) {
-          std::fstream mappedFile(filename, std::ios::binary | std::ios::in | std::ios::out);
-          mappedFile.seekp(offsetBytes);
-          mappedFile.write(reinterpret_cast<char*>(this->Chunk.get()), chunkSizeBytes);
-        } else if constexpr (Method == IOMethod::SYSCALL) {
-          int fId = open(filename.c_str(), O_BINARY | O_WRONLY);
-          if (fId != -1) {
-            _lseeki64(fId, offsetBytes, SEEK_SET);
-            _write(fId, this->Chunk.get(), chunkSizeBytes);
-          }
-          _close(fId);
-        }
-      }
-    }
-
-  private:
-    size_t Offset, ChunkSize;
-    std::shared_ptr< unsigned short[] > Chunk;
-  };
-
-  // -------------------------------------------------------------------------------- //
 
   template< class T >
   class ThreadSafeQueue
@@ -188,7 +118,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::NonThreadingCopying(std:
   auto start1 = std::chrono::high_resolution_clock::now();
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::IOTask<IOMethod::FSTREAM> task{offset, chunkSize};
+    IOTask<IOMethod::FSTREAM> task{offset, chunkSize};
     task.Execute(this->InputFilename,  true);
     task.Execute(this->OutputFilename, false);
   }
@@ -199,7 +129,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::NonThreadingCopying(std:
   auto start2 = std::chrono::high_resolution_clock::now();
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::IOTask<IOMethod::MMAP> task{offset, chunkSize};
+    IOTask<IOMethod::MMAP> task{offset, chunkSize};
     task.Execute(this->InputFilename,  true);
     task.Execute(this->OutputFilename, false);
   }
@@ -210,7 +140,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::NonThreadingCopying(std:
   auto start3 = std::chrono::high_resolution_clock::now();
 
   for (auto const& [offset, chunkSize] : chunks) {
-    impl::IOTask<IOMethod::SYSCALL> task{offset, chunkSize};
+    IOTask<IOMethod::SYSCALL> task{offset, chunkSize};
     task.Execute(this->InputFilename,  true);
     task.Execute(this->OutputFilename, false);
   }
@@ -227,7 +157,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
 
   size_t const numChunks = chunks.size();
   auto const [off0, cs0] = chunks[0];
-  impl::IOTask<IOMethod::FSTREAM> inTask{off0, cs0}, outTask{off0, cs0};
+  IOTask<IOMethod::FSTREAM> inTask{off0, cs0}, outTask{off0, cs0};
 
   for (int i = 0; i <= numChunks; ++i) {
     #pragma omp parallel sections
@@ -237,7 +167,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
         // Input
         if (i < numChunks) {
           auto const [off, cs] = chunks[i];
-          inTask = impl::IOTask<IOMethod::FSTREAM>{off, cs};
+          inTask = IOTask<IOMethod::FSTREAM>{off, cs};
           inTask.Execute(this->InputFilename, true);
         }
       }
@@ -260,7 +190,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
 
   auto start2 = std::chrono::high_resolution_clock::now();
 
-  impl::IOTask<IOMethod::MMAP> inTask2{off0, cs0}, outTask2{off0, cs0};
+  IOTask<IOMethod::MMAP> inTask2{off0, cs0}, outTask2{off0, cs0};
 
   for (int i = 0; i <= numChunks; ++i) {
     #pragma omp parallel sections
@@ -270,7 +200,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
         // Input
         if (i < numChunks) {
           auto const [off, cs] = chunks[i];
-          inTask2 = impl::IOTask<IOMethod::MMAP>{off, cs};
+          inTask2 = IOTask<IOMethod::MMAP>{off, cs};
           inTask2.Execute(this->InputFilename, true);
         }
       }
@@ -292,7 +222,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
 
   auto start3 = std::chrono::high_resolution_clock::now();
 
-  impl::IOTask<IOMethod::SYSCALL> inTask3{off0, cs0}, outTask3{off0, cs0};
+  IOTask<IOMethod::SYSCALL> inTask3{off0, cs0}, outTask3{off0, cs0};
 
   for (int i = 0; i <= numChunks; ++i) {
     #pragma omp parallel sections
@@ -302,7 +232,7 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ManuallyOverlappingCopyi
         // Input
         if (i < numChunks) {
           auto const [off, cs] = chunks[i];
-          inTask3 = impl::IOTask<IOMethod::SYSCALL>{off, cs};
+          inTask3 = IOTask<IOMethod::SYSCALL>{off, cs};
           inTask3.Execute(this->InputFilename, true);
         }
       }
@@ -393,10 +323,10 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ThreadedWriteCopying(std
   std::vector<std::future<void>> writePromises;
   for (auto const& [offset, chunkSize] : chunks) {
     // Main thread reads (and processes)
-    impl::IOTask<IOMethod::FSTREAM> task(offset, chunkSize);
+    IOTask<IOMethod::FSTREAM> task(offset, chunkSize);
     task.Execute(this->InputFilename, true);
     // Async writing
-    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::FSTREAM> task){ task.Execute(this->OutputFilename, false); }, task));
+    writePromises.push_back(std::async(std::launch::async, [this](IOTask<IOMethod::FSTREAM> task){ task.Execute(this->OutputFilename, false); }, task));
   }
   for (auto& promise : writePromises) {
     promise.get();
@@ -409,10 +339,10 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ThreadedWriteCopying(std
   auto start2 = std::chrono::high_resolution_clock::now();
   for (auto const& [offset, chunkSize] : chunks) {
     // Main thread reads (and processes)
-    impl::IOTask<IOMethod::MMAP> task(offset, chunkSize);
+    IOTask<IOMethod::MMAP> task(offset, chunkSize);
     task.Execute(this->InputFilename, true);
     // Async writing
-    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::MMAP> task) { task.Execute(this->OutputFilename, false); }, task));
+    writePromises.push_back(std::async(std::launch::async, [this](IOTask<IOMethod::MMAP> task) { task.Execute(this->OutputFilename, false); }, task));
   }
   for (auto& promise : writePromises) {
     promise.get();
@@ -425,10 +355,10 @@ io::QueueChunkedCopier::Timings io::QueueChunkedCopier::ThreadedWriteCopying(std
   auto start3 = std::chrono::high_resolution_clock::now();
   for (auto const& [offset, chunkSize] : chunks) {
     // Main thread reads (and processes)
-    impl::IOTask<IOMethod::SYSCALL> task(offset, chunkSize);
+    IOTask<IOMethod::SYSCALL> task(offset, chunkSize);
     task.Execute(this->InputFilename, true);
     // Async writing
-    writePromises.push_back(std::async(std::launch::async, [this](impl::IOTask<IOMethod::SYSCALL> task) { task.Execute(this->OutputFilename, false); }, task));
+    writePromises.push_back(std::async(std::launch::async, [this](IOTask<IOMethod::SYSCALL> task) { task.Execute(this->OutputFilename, false); }, task));
   }
   for (auto& promise : writePromises) {
     promise.get();
