@@ -585,7 +585,7 @@ void MeasureReadVsWrite(std::string const& inputMhd, std::string const& outputMh
 
   size_t const sliceSize = dims[0] * dims[1];
 
-  int const runs = 1;// 5;
+  int const runs = 5;
   std::vector<double> percentages{1.00000, 0.50000, 0.25000, 0.12500, 0.06250, 0.03125};
 
   for (double percentage : percentages) {
